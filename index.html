@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Kcal – náhled</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="phone" role="application" aria-label="Kcal náhled">
+    <header class="topbar">
+      <div class="brand">Kcal</div>
+      <div class="date-pill" id="date-pill">pá 6. 11.</div>
+    </header>
+
+    <main class="screens">
+      <!-- Dnes -->
+      <section class="screen" id="screen-dnes">
+        <div class="card">
+          <div class="kcal-hero">
+            <div class="ring-wrap" aria-hidden="true">
+              <svg viewBox="0 0 118 118">
+                <circle class="ring-bg" cx="59" cy="59" r="48"></circle>
+                <circle class="ring-fg" id="kcal-ring" cx="59" cy="59" r="48"></circle>
+              </svg>
+              <div class="ring-center">
+                <div>
+                  <strong id="kcal-left">—</strong>
+                  <span id="kcal-left-label">kcal zbývá</span>
+                </div>
+              </div>
+            </div>
+            <div class="kcal-side">
+              <h2>Dnes · trénink</h2>
+              <p>Cíl 2800 kcal. Makra níž, jídla ve slotech.</p>
+              <div class="eaten">Snědeno: <b id="kcal-eaten">—</b></div>
+            </div>
+          </div>
+          <div class="macros" id="macros" style="margin-top:14px"></div>
+        </div>
+        <div id="meals"></div>
+      </section>
+
+      <!-- Mikro -->
+      <section class="screen" id="screen-mikro">
+        <p class="note">Vitaminy a minerály vs. denní orientační cíl (EFSA, dospělý muž). Není to lékařská rada — jen přehled, co dnes jsi pokryl.</p>
+        <div id="mikro-list"></div>
+      </section>
+
+      <!-- Zásoby -->
+      <section class="screen" id="screen-zasoby">
+        <p class="note">Co máš doma. Klepni na místo.</p>
+        <div class="loc-tabs" role="tablist">
+          <button type="button" class="loc-tab active" data-loc="lednice">Lednice</button>
+          <button type="button" class="loc-tab" data-loc="mrazak">Mrazák</button>
+          <button type="button" class="loc-tab" data-loc="spiz">Spíž</button>
+        </div>
+        <div class="card" id="pantry-list"></div>
+      </section>
+
+      <!-- Přidat -->
+      <section class="screen" id="screen-pridat">
+        <p class="note">Vyber slot a klepni na potravinu, nebo naskenuj kód kamerou (zůstává v telefonu — nikam se neposílá).</p>
+        <div class="meal-pick" aria-label="Slot jídla">
+          <button type="button" data-meal="snidane">Snídaně</button>
+          <button type="button" data-meal="obed" class="active">Oběd</button>
+          <button type="button" data-meal="svacina">Svačina</button>
+          <button type="button" data-meal="vecere">Večeře</button>
+        </div>
+
+        <div class="barcode-box" id="barcode-box">
+          <div class="barcode-title">Čárový kód</div>
+          <button type="button" id="barcode-scan" class="btn-primary">Naskenovat kód</button>
+          <div class="scan-panel" id="scan-panel" hidden>
+            <video id="scan-video" playsinline muted></video>
+            <div class="scan-hint">Namiř zadní kameru na EAN. Čtení jen v prohlížeči.</div>
+            <button type="button" id="scan-stop" class="btn-secondary">Zavřít kameru</button>
+          </div>
+          <label for="barcode" class="barcode-label">Nebo opsat číslo</label>
+          <input id="barcode" type="text" inputmode="numeric" placeholder="EAN-13 / EAN-8" autocomplete="off" />
+          <button type="button" id="barcode-go" class="btn-secondary" style="margin-top:8px;width:100%">Použít opsaný kód</button>
+          <details class="local-photo">
+            <summary>Jiná možnost: přečíst fotku tady v telefonu</summary>
+            <p>Fotka se nikam neodesílá — dekód běží jen u tebe.</p>
+            <div class="photo-actions">
+              <label class="file-btn" for="barcode-camera">Vyfotit kód
+                <input id="barcode-camera" type="file" accept="image/*" capture="environment" hidden />
+              </label>
+              <label class="file-btn" for="barcode-gallery">Vybrat fotku
+                <input id="barcode-gallery" type="file" accept="image/*" hidden />
+              </label>
+            </div>
+            <div class="photo-preview" id="photo-preview" hidden>
+              <img id="photo-thumb" alt="Náhled fotky s kódem" />
+              <span id="photo-status">Čtu kód…</span>
+            </div>
+          </details>
+          <p class="barcode-note">Live lookup potraviny = Open Food Facts později. Demo EAN v mock datech: 8594001123452.</p>
+        </div>
+
+        <input class="search" id="food-search" type="search" placeholder="Hledej potravinu…" autocomplete="off" />
+        <div id="food-results"></div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <nav class="bottom-nav" aria-label="Hlavní">
+      <button type="button" class="nav-btn active" data-nav="dnes"><span class="ico" aria-hidden="true">◉</span>Dnes</button>
+      <button type="button" class="nav-btn" data-nav="mikro"><span class="ico" aria-hidden="true">◎</span>Mikro</button>
+      <button type="button" class="nav-btn" data-nav="zasoby"><span class="ico" aria-hidden="true">▦</span>Zásoby</button>
+      <button type="button" class="nav-btn" data-nav="pridat"><span class="ico" aria-hidden="true">＋</span>Přidat</button>
+    </nav>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
