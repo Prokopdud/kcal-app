@@ -102,7 +102,7 @@ body {
 .kcal-side .eaten b { color: var(--ink); }
 
 .macros { display: grid; gap: 10px; margin-top: 4px; }
-.macro-row { display: grid; grid-template-columns: 78px 1fr 64px; gap: 8px; align-items: center; font-size: 0.86rem; }
+.macro-row { display: grid; grid-template-columns: 78px 1fr auto; gap: 8px; align-items: center; font-size: 0.86rem; }
 .macro-row .bar {
   height: 9px; background: #efe9dd; border-radius: 999px; overflow: hidden;
 }
@@ -110,7 +110,7 @@ body {
 .macro-row .fill.p { background: #0f766e; }
 .macro-row .fill.c { background: #3b82a8; }
 .macro-row .fill.f { background: #c9891a; }
-.macro-row .nums { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.macro-row .nums { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .section-title {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -375,3 +375,139 @@ body {
   background: #fff;
 }
 .photo-preview span { font-size: 0.78rem; color: var(--muted); line-height: 1.3; }
+
+/* --- week rings, amount sheet, custom foods --- */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+.week-card { padding: 10px 10px 8px; }
+.week-nav { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.week-arrow {
+  width: 36px; height: 36px; flex: 0 0 36px;
+  border-radius: 12px; background: var(--chip);
+  font-size: 1.35rem; font-weight: 700; line-height: 1; color: var(--ink);
+}
+.date-field { flex: 1; min-width: 0; }
+.date-field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 12px;
+  padding: 8px 8px;
+  color: var(--ink);
+}
+.week-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.day-btn {
+  display: grid; justify-items: center; gap: 1px;
+  padding: 3px 0 4px; border-radius: 12px;
+}
+.day-btn.selected { background: var(--primary-soft); }
+.day-btn .lbl { font-size: 0.68rem; font-weight: 750; color: var(--muted); }
+.day-btn.selected .lbl { color: var(--primary); }
+.mini-ring { width: 32px; height: 32px; }
+.mini-ring svg { width: 32px; height: 32px; transform: rotate(-90deg); }
+.mini-ring .track { fill: none; stroke: #ebe5da; stroke-width: 3.5; }
+.mini-ring .fg { fill: none; stroke-width: 3.5; stroke-linecap: round; }
+.mini-ring .fg.under { stroke: #9aa3af; }
+.mini-ring .fg.met { stroke: #2f9e6b; }
+.mini-ring .fg.over { stroke: #e07a12; }
+.mini-ring .fg.high { stroke: #dc3d3d; }
+.today-link {
+  display: block; margin: 6px auto 0; color: var(--primary);
+  font-size: 0.78rem; font-weight: 750;
+}
+.today-link[hidden] { display: none !important; }
+#kcal-ring.met { stroke: var(--good); }
+#kcal-ring.over { stroke: #e07a12; }
+#kcal-ring.high { stroke: #dc3d3d; }
+.empty-meal { margin: 0 0 4px; }
+.food-edit { text-align: left; width: 100%; padding: 0; }
+.food-side { text-align: right; align-self: center; }
+.row-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 2px; }
+.link-edit, .link-del { font-size: 0.72rem; font-weight: 750; padding: 2px 0; }
+.link-edit { color: var(--primary); }
+.link-del { color: #dc3d3d; }
+.add-target {
+  margin: -4px 4px 10px; color: var(--ink); font-size: 0.82rem; font-weight: 650;
+}
+.food-pick-row { position: relative; margin-bottom: 8px; }
+.food-pick-row .food-pick { margin-bottom: 0; }
+.food-pick-row .food-pick .sub { padding-right: 58px; }
+.food-edit-link {
+  position: absolute; right: 10px; bottom: 8px; z-index: 1;
+  color: var(--primary); font-size: 0.72rem; font-weight: 750;
+  padding: 4px 2px;
+}
+.sheet-back {
+  position: absolute; inset: 0; z-index: 20;
+  background: rgba(28, 36, 48, 0.45);
+  display: flex; align-items: flex-end;
+}
+.sheet-back[hidden] { display: none !important; }
+.sheet {
+  width: 100%;
+  background: var(--surface);
+  border-radius: 22px 22px 0 0;
+  padding: 14px 16px calc(16px + var(--safe-b));
+  max-height: 88%;
+  overflow: auto;
+  box-shadow: 0 -12px 30px rgba(28, 36, 48, 0.16);
+}
+.sheet h3 { margin: 0 0 4px; font-size: 1.05rem; }
+.sheet-sub, .sheet-hint {
+  margin: 0 0 12px; color: var(--muted); font-size: 0.8rem; line-height: 1.35;
+}
+.gram-step {
+  display: grid; grid-template-columns: 48px 1fr 48px; gap: 8px; align-items: center;
+}
+.gram-step > button {
+  height: 48px; border-radius: 14px; background: var(--chip);
+  font-size: 1.5rem; font-weight: 700;
+}
+.gram-field { position: relative; }
+.gram-field input {
+  width: 100%; text-align: center; font-size: 1.35rem; font-weight: 750;
+  padding: 10px 28px 10px 10px; border-radius: 14px; border: 1px solid var(--line); background: #fff;
+}
+.gram-field span {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); font-weight: 700;
+}
+.pack-row { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.pack-btn {
+  width: 100%; text-align: left; padding: 12px 14px; border-radius: 14px;
+  background: var(--primary-soft); color: var(--primary); font-weight: 750;
+}
+.pack-btn[hidden], .btn-danger[hidden], .btn-secondary[hidden] { display: none !important; }
+.macro-preview {
+  margin-top: 12px; background: #faf8f3; border: 1px solid var(--line);
+  border-radius: 14px; padding: 12px;
+}
+.preview-kicker { color: var(--muted); font-size: 0.75rem; font-weight: 700; }
+.preview-kcal { font-size: 0.95rem; margin-top: 2px; }
+.preview-kcal strong { font-size: 1.45rem; letter-spacing: -0.03em; }
+.preview-macros { display: flex; gap: 10px; margin-top: 4px; font-size: 0.86rem; font-weight: 650; }
+.preview-day { margin-top: 8px; font-size: 0.82rem; color: var(--muted); }
+.preview-empty { margin: 0; color: var(--muted); font-size: 0.82rem; }
+.sheet-actions { display: flex; gap: 8px; margin-top: 12px; }
+.sheet-actions .btn-primary,
+.sheet-actions .btn-secondary,
+.sheet-actions .btn-danger { width: auto; flex: 1; }
+.btn-danger {
+  padding: 10px 12px; border-radius: 12px; background: #fde8e8; color: #dc3d3d;
+  font-weight: 750; font-size: 0.86rem;
+}
+.field { display: block; font-size: 0.75rem; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.field input {
+  display: block; width: 100%; margin-top: 4px; padding: 10px 12px;
+  border-radius: 12px; border: 1px solid var(--line); background: #fff;
+  color: var(--ink); font-size: 1rem; font-weight: 650;
+}
+.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

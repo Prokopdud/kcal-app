@@ -1,7 +1,7 @@
 # Kcal
 
-Statický náhled osobního kalorického deníku Prokopa Dudmana.
+Osobní kalorický deník Prokopa Dudmana na každý den: deník jídel, makra, mikronutrienty, zásoby a sken čárového kódu.
 
-Ukazuje deník jídel, makra, mikronutrienty, zásoby a sken čárového kódu. Jde o čisté HTML, CSS a JavaScript bez buildu.
+Čisté HTML, CSS a JavaScript, bez buildu a bez serveru. Zápisy, vybraný den a vlastní potraviny zůstávají v prohlížeči (localStorage). Dá se přidat na plochu iPhonu.
 
 Náhled: https://prokopdud.github.io/kcal-app/
