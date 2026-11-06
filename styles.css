@@ -94,8 +94,9 @@ body {
 .ring-center {
   position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
 }
-.ring-center strong { display: block; font-size: 1.35rem; letter-spacing: -0.03em; }
-.ring-center span { color: var(--muted); font-size: 0.75rem; }
+.ring-center strong { display: block; font-size: 1.28rem; letter-spacing: -0.03em; line-height: 1.05; }
+.ring-center span { color: var(--muted); font-size: 0.72rem; }
+.ring-center .kcal-goal { display: block; margin-top: 1px; font-size: 0.68rem; }
 .kcal-side h2 { margin: 0 0 4px; font-size: 1rem; }
 .kcal-side p { margin: 0; color: var(--muted); font-size: 0.86rem; line-height: 1.35; }
 .kcal-side .eaten { margin-top: 10px; font-size: 0.9rem; }
@@ -125,8 +126,13 @@ body {
 .meal-kcal { color: var(--muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 
 .food-row {
+  position: relative;
   display: grid; grid-template-columns: 1fr auto; gap: 8px;
   padding: 8px 0; border-top: 1px solid var(--line); font-size: 0.9rem;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .food-row:first-of-type { border-top: 0; }
 .food-row .meta { color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
@@ -428,12 +434,26 @@ body {
 #kcal-ring.over { stroke: #e07a12; }
 #kcal-ring.high { stroke: #dc3d3d; }
 .empty-meal { margin: 0 0 4px; }
-.food-edit { text-align: left; width: 100%; padding: 0; }
 .food-side { text-align: right; align-self: center; }
-.row-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 2px; }
-.link-edit, .link-del { font-size: 0.72rem; font-weight: 750; padding: 2px 0; }
-.link-edit { color: var(--primary); }
-.link-del { color: #dc3d3d; }
+.row-pop {
+  position: absolute; z-index: 4;
+  left: 0; right: 0; top: 4px; bottom: 4px;
+  display: flex; gap: 8px; align-items: stretch;
+}
+.row-pop[hidden] { display: none !important; }
+.pop-rect {
+  flex: 1;
+  border-radius: 10px;
+  font-weight: 750;
+  font-size: 0.92rem;
+  color: #fff;
+}
+.pop-rect.edit { background: var(--primary); }
+.pop-rect.del { background: #dc3d3d; }
+.off-status { margin: -4px 4px 8px; color: var(--muted); font-size: 0.75rem; min-height: 0; }
+.off-status:empty { display: none; }
+.food-pick.off { border-style: dashed; }
+.food-pick.missing { opacity: 0.72; }
 .add-target {
   margin: -4px 4px 10px; color: var(--ink); font-size: 0.82rem; font-weight: 650;
 }

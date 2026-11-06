@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon-180.png" />
   <link rel="icon" href="icon-192.png" />
-  <link rel="stylesheet" href="styles.css?v=2" />
+  <link rel="stylesheet" href="styles.css?v=3" />
 </head>
 <body>
   <div class="phone" role="application" aria-label="Kcal">
@@ -45,15 +45,15 @@
               </svg>
               <div class="ring-center">
                 <div>
-                  <strong id="kcal-left">—</strong>
-                  <span id="kcal-left-label">kcal zbývá</span>
+                  <strong id="kcal-total">—</strong>
+                  <span id="kcal-total-label">kcal celkem</span>
+                  <span id="kcal-goal" class="kcal-goal">z 2800</span>
                 </div>
               </div>
             </div>
             <div class="kcal-side">
               <h2 id="day-heading">Dnes · trénink</h2>
               <p id="day-blurb">Cíl 2800 kcal. Makra níž, jídla ve slotech.</p>
-              <div class="eaten">Snědeno: <b id="kcal-eaten">—</b></div>
             </div>
           </div>
           <div class="macros" id="macros" style="margin-top:14px"></div>
@@ -80,7 +80,7 @@
 
       <!-- Přidat -->
       <section class="screen" id="screen-pridat">
-        <p class="note">Vyber slot a klepni na potravinu, nebo naskenuj kód kamerou (zůstává v telefonu — nikam se neposílá).</p>
+        <p class="note">Vyber slot a klepni na potravinu. Kamera i fotka kódu zůstávají v telefonu — ven jde jen číslo, a to do Open Food Facts.</p>
         <p class="add-target" id="add-target"></p>
         <div class="meal-pick" aria-label="Slot jídla">
           <button type="button" data-meal="snidane">Snídaně</button>
@@ -116,11 +116,12 @@
               <span id="photo-status">Čtu kód…</span>
             </div>
           </details>
-          <p class="barcode-note">Live lookup potraviny = Open Food Facts později. Demo EAN v mock datech: 8594001123452.</p>
+          <p class="barcode-note">Neznámý kód se dohledá v Open Food Facts. Místní demo EAN: 8594001123452.</p>
         </div>
 
         <button type="button" id="new-food" class="add-slot">+ Nová potravina</button>
-        <input class="search" id="food-search" type="search" placeholder="Hledej potravinu…" autocomplete="off" />
+        <input class="search" id="food-search" type="search" placeholder="Hledej potravinu nebo výrobek…" autocomplete="off" />
+        <p class="off-status" id="off-status"></p>
         <div id="food-results"></div>
       </section>
     </main>
@@ -193,7 +194,7 @@
     </nav>
   </div>
 
-  <script src="data.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="data.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

@@ -21,6 +21,16 @@
   let zxingControls = null;
   let scanning = false;
   let zxingLoading = null;
+  let sessionFoods = new Map();
+  let shownOff = new Map();
+  let offHits = [];
+  let offFor = '';
+  let offToken = 0;
+  let offAbort = null;
+  let offTimer = null;
+  let barcodeAbort = null;
+  let hold = null;
+  let pressSerial = 0;
 
   function todayISO() {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -82,15 +92,23 @@
     return parseFloat(String(value).replace(',', '.').trim());
   }
 
+  function scaled(value, grams, digits) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    return round(value * (grams / 100), digits);
+  }
+
   function foodMacros(food, grams) {
-    const s = grams / 100;
     return {
-      kcal: round(food.kcal * s),
-      protein: round(food.protein * s, 1),
-      carbs: round(food.carbs * s, 1),
-      fat: round(food.fat * s, 1),
-      fiber: round((food.fiber || 0) * s, 1),
+      kcal: scaled(food.kcal, grams, 0),
+      protein: scaled(food.protein, grams, 1),
+      carbs: scaled(food.carbs, grams, 1),
+      fat: scaled(food.fat, grams, 1),
+      fiber: scaled(food.fiber, grams, 1),
     };
+  }
+
+  function addNum(sum, value) {
+    return value == null ? sum : sum + value;
   }
 
   /* Green: at the goal, slack up to about +3% or +80 kcal.
@@ -125,7 +143,13 @@
       if (over.package_g == null) delete merged.package_g;
       return merged;
     });
-    return base.concat(state.customFoods);
+    const saved = state.offFoods || [];
+    const savedIds = new Set(saved.map((food) => food.id));
+    const pending = [];
+    sessionFoods.forEach((food) => {
+      if (!savedIds.has(food.id) && food.kcal != null) pending.push(food);
+    });
+    return base.concat(state.customFoods, saved, pending);
   }
 
   function foodById(id) {
@@ -145,11 +169,11 @@
       const food = foodById(entry.foodId);
       if (!food) continue;
       const macros = foodMacros(food, entry.grams);
-      totals.kcal += macros.kcal;
-      totals.protein += macros.protein;
-      totals.carbs += macros.carbs;
-      totals.fat += macros.fat;
-      totals.fiber += macros.fiber;
+      totals.kcal = addNum(totals.kcal, macros.kcal);
+      totals.protein = addNum(totals.protein, macros.protein);
+      totals.carbs = addNum(totals.carbs, macros.carbs);
+      totals.fat = addNum(totals.fat, macros.fat);
+      totals.fiber = addNum(totals.fiber, macros.fiber);
       const scale = entry.grams / 100;
       for (const [key, value] of Object.entries(food.micros || {})) {
         if (typeof value !== 'number') continue;
@@ -226,6 +250,45 @@
     return item;
   }
 
+  function sanitizeOff(food) {
+    if (!food || !food.id || !food.name) return null;
+    const kcal = num(food.kcal);
+    if (!Number.isFinite(kcal) || kcal < 0) return null;
+    const macro = (value) => {
+      if (value == null || value === '') return null;
+      const n = num(value);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const item = {
+      id: String(food.id),
+      name: String(food.name).slice(0, 80),
+      off: true,
+      kcal: round(kcal, 1),
+      protein: macro(food.protein),
+      carbs: macro(food.carbs),
+      fat: macro(food.fat),
+      fiber: macro(food.fiber),
+      micros: {},
+      default_serving_g: Number.isFinite(num(food.default_serving_g)) ? num(food.default_serving_g) : 100,
+    };
+    const pack = num(food.package_g);
+    if (Number.isFinite(pack) && pack > 0) item.package_g = round(pack, 1);
+    const piece = num(food.piece_g);
+    if (Number.isFinite(piece) && piece > 0) item.piece_g = round(piece, 1);
+    if (food.barcode) item.barcode = String(food.barcode).replace(/\D/g, '');
+    return item;
+  }
+
+  function storeOffFood(food) {
+    const copy = sanitizeOff(food);
+    if (!copy) return;
+    if (!state.offFoods) state.offFoods = [];
+    const index = state.offFoods.findIndex((item) => item.id === copy.id);
+    if (index >= 0) state.offFoods[index] = copy;
+    else state.offFoods.push(copy);
+    sessionFoods.set(copy.id, copy);
+  }
+
   function loadState() {
     const today = todayISO();
     let saved = null;
@@ -242,6 +305,7 @@
         openedOn: today,
         diary: saved.diary.map(sanitizeEntry).filter(Boolean),
         customFoods: (saved.customFoods || []).map(sanitizeFood).filter(Boolean),
+        offFoods: (saved.offFoods || []).map(sanitizeOff).filter(Boolean),
         foodOverrides: saved.foodOverrides && typeof saved.foodOverrides === 'object' ? saved.foodOverrides : {},
       };
       persist();
@@ -252,6 +316,7 @@
       openedOn: today,
       diary: (KCAL.sampleDiary || []).map((entry) => ({ ...entry })),
       customFoods: [],
+      offFoods: [],
       foodOverrides: {},
     };
     persist();
@@ -303,6 +368,148 @@
   function findByBarcode(code) {
     const cleaned = String(code || '').replace(/\s+/g, '');
     return catalog().find((food) => food.barcode && food.barcode === cleaned) || null;
+  }
+
+  function gramsFromText(text) {
+    const source = String(text || '').toLowerCase().replace(',', '.');
+    if (!source) return null;
+    const multi = source.match(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(kg|g)\b/);
+    if (multi) {
+      const amount = Number(multi[1]) * Number(multi[2]);
+      return multi[3] === 'kg' ? amount * 1000 : amount;
+    }
+    const one = source.match(/(\d+(?:\.\d+)?)\s*(kg|g)\b/);
+    if (!one) return null;
+    const amount = Number(one[1]);
+    return one[2] === 'kg' ? amount * 1000 : amount;
+  }
+
+  function gramsFromOff(product) {
+    const unit = String(product.product_quantity_unit || '').trim().toLowerCase();
+    const quantity = num(product.product_quantity);
+    if (Number.isFinite(quantity) && quantity > 0) {
+      if (unit === 'kg') return quantity * 1000;
+      if (unit === 'g' || unit === 'gr' || unit === 'gram' || unit === 'grams') return quantity;
+      if (unit === 'mg') return quantity / 1000;
+      if (unit) return null;
+    }
+    return gramsFromText(product.quantity);
+  }
+
+  function servingGrams(product) {
+    const fromSize = gramsFromText(product.serving_size);
+    if (fromSize) return fromSize;
+    const quantity = num(product.serving_quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) return null;
+    const size = String(product.serving_size || '').toLowerCase();
+    if (/ml|cl|dl|\bl\b/.test(size)) return null;
+    if (/\bkg\b/.test(size)) return quantity * 1000;
+    return quantity;
+  }
+
+  function offNutrition(nutriments) {
+    const source = nutriments || {};
+    let kcal = num(source['energy-kcal_100g']);
+    if (!Number.isFinite(kcal)) kcal = num(source['energy-kcal']);
+    if (!Number.isFinite(kcal)) {
+      const kj = num(source['energy-kj_100g']);
+      if (Number.isFinite(kj)) kcal = kj / 4.184;
+    }
+    if (!Number.isFinite(kcal) || kcal < 0 || kcal > 2000) return null;
+    const macro = (key) => {
+      if (!(key in source) || source[key] == null || source[key] === '') return null;
+      const value = num(source[key]);
+      if (!Number.isFinite(value) || value < 0 || value > 100) return null;
+      return round(value, 1);
+    };
+    return {
+      kcal: round(kcal, 1),
+      protein: macro('proteins_100g'),
+      carbs: macro('carbohydrates_100g'),
+      fat: macro('fat_100g'),
+      fiber: macro('fiber_100g'),
+    };
+  }
+
+  function offName(product) {
+    const czech = String(product.product_name_cs || '').trim();
+    const name = String(product.product_name || '').trim();
+    let label = czech || name;
+    if (!label) return '';
+    const brand = String(product.brands || '').split(',')[0].trim();
+    if (brand && !label.toLowerCase().includes(brand.toLowerCase())) {
+      label = `${label} (${brand})`;
+    }
+    return label.slice(0, 80);
+  }
+
+  function mapOffProduct(product) {
+    if (!product) return null;
+    const code = String(product.code || '').replace(/\D/g, '');
+    const name = offName(product);
+    if (!code || !name) return null;
+    const nutrition = offNutrition(product.nutriments);
+    const pack = gramsFromOff(product);
+    const piece = servingGrams(product);
+    const food = {
+      id: 'off:' + code,
+      name,
+      barcode: code,
+      off: true,
+      micros: {},
+      kcal: nutrition ? nutrition.kcal : null,
+      protein: nutrition ? nutrition.protein : null,
+      carbs: nutrition ? nutrition.carbs : null,
+      fat: nutrition ? nutrition.fat : null,
+      fiber: nutrition ? nutrition.fiber : null,
+      default_serving_g: piece || 100,
+    };
+    if (pack && pack > 0 && pack <= 20000) food.package_g = round(pack, 1);
+    if (piece && piece > 0 && piece <= 5000) food.piece_g = round(piece, 1);
+    return food;
+  }
+
+  async function offGet(url, signal) {
+    let response;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      response = await fetch(url, { signal, headers: { Accept: 'application/json' } });
+      if (response.status === 404) return null;
+      if (response.status !== 503 && response.status !== 429) break;
+      await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+    if (!response || !response.ok) throw new Error('Open Food Facts ' + (response && response.status));
+    return response.json();
+  }
+
+  async function fetchOffByCode(code, signal) {
+    const fields = 'code,product_name,product_name_cs,brands,quantity,product_quantity,product_quantity_unit,serving_quantity,serving_size,nutriments';
+    const data = await offGet(
+      `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=${fields}`,
+      signal
+    );
+    if (!data || data.status !== 1 || !data.product) return null;
+    return mapOffProduct(data.product);
+  }
+
+  async function searchOff(query, signal) {
+    const params = new URLSearchParams({
+      q: query,
+      page_size: '12',
+      lc: 'cs',
+      cc: 'cz',
+      fields: 'code,product_name,product_name_cs,brands,quantity,product_quantity,product_quantity_unit,serving_quantity,serving_size,nutriments',
+    });
+    const data = await offGet(`https://world.openfoodfacts.org/api/v2/search?${params}`, signal);
+    const foods = [];
+    for (const product of (data && data.products) || []) {
+      const food = mapOffProduct(product);
+      if (food) foods.push(food);
+    }
+    return foods;
+  }
+
+  function explainMissing(food) {
+    toast(`${food.name}: Open Food Facts nemá kcal na 100 g, takže to nepřidám.`, 3800);
   }
 
   function openAdd(food) {
@@ -391,17 +598,15 @@
       extra: { foodId: food.id, grams },
     });
     const goal = KCAL.goals.kcal;
-    const delta = totals.kcal - goal;
-    const dayLine = delta > 0
-      ? `Den pak <b>${totals.kcal}</b> / ${goal} kcal · o ${delta} navíc`
-      : `Den pak <b>${totals.kcal}</b> / ${goal} kcal · zbývá ${goal - totals.kcal}`;
+    const dayLine = `Den pak <b>${totals.kcal}</b> kcal z ${goal}`;
+    const gram = (value) => (value == null ? '—' : `${value} g`);
     root.innerHTML = `
       <div class="preview-kicker">${amountCtx.mode === 'edit' ? 'Po úpravě' : 'Tohle přidáš'}</div>
       <div class="preview-kcal"><strong>${macros.kcal}</strong> kcal</div>
       <div class="preview-macros">
-        <span>B ${macros.protein} g</span>
-        <span>S ${macros.carbs} g</span>
-        <span>T ${macros.fat} g</span>
+        <span>B ${gram(macros.protein)}</span>
+        <span>S ${gram(macros.carbs)}</span>
+        <span>T ${gram(macros.fat)}</span>
       </div>
       <div class="preview-day">${dayLine}</div>`;
   }
@@ -429,6 +634,7 @@
       return;
     }
     const meal = amountCtx.meal;
+    if (food.off) storeOffFood(food);
     state.diary.push({
       id: nextDiaryId(),
       date: amountCtx.date,
@@ -588,20 +794,41 @@
     renderActive();
   }
 
-  function applyBarcode(code) {
+  async function applyBarcode(code) {
     const cleaned = String(code || '').replace(/\D/g, '');
     if (!cleaned) {
       toast('Zadej nebo naskenuj EAN.');
       return;
     }
     document.getElementById('barcode').value = cleaned;
-    const food = findByBarcode(cleaned);
-    if (food) {
-      toast('Načteno: ' + food.name);
-      openAdd(food);
+    const local = findByBarcode(cleaned);
+    if (local) {
+      toast('Načteno: ' + local.name);
+      openAdd(local);
       return;
     }
-    toast('Kód známý, ale lookup přes Open Food Facts přijde později.', 3200);
+    if (barcodeAbort) barcodeAbort.abort();
+    const controller = new AbortController();
+    barcodeAbort = controller;
+    toast('Hledám kód v Open Food Facts…', 2200);
+    try {
+      const food = await fetchOffByCode(cleaned, controller.signal);
+      if (controller.signal.aborted) return;
+      if (!food) {
+        toast('V Open Food Facts ten kód není.', 3200);
+        return;
+      }
+      if (food.kcal == null) {
+        explainMissing(food);
+        return;
+      }
+      sessionFoods.set(food.id, food);
+      toast('Načteno: ' + food.name);
+      openAdd(food);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      toast('Open Food Facts teď neodpovídá. Zkus to za chvíli.', 3400);
+    }
   }
 
   function stopScan() {
@@ -793,8 +1020,6 @@
   function renderDnes() {
     const totals = dayTotals(state.selectedDate);
     const goal = KCAL.goals;
-    const left = Math.max(0, goal.kcal - totals.kcal);
-    const over = totals.kcal > goal.kcal;
     const status = dayBand(totals.kcal);
     const today = state.selectedDate === todayISO();
     paintDate();
@@ -803,9 +1028,8 @@
     document.getElementById('day-blurb').textContent = today
       ? 'Cíl 2800 kcal. Makra níž, jídla ve slotech.'
       : 'Jiný den. Můžeš dopsat, co už bylo, nebo si jídlo naplánovat.';
-    document.getElementById('kcal-left').textContent = over ? `+${totals.kcal - goal.kcal}` : String(left);
-    document.getElementById('kcal-left-label').textContent = over ? 'kcal navíc' : 'kcal zbývá';
-    document.getElementById('kcal-eaten').textContent = `${totals.kcal} / ${goal.kcal} kcal`;
+    document.getElementById('kcal-total').textContent = String(totals.kcal);
+    document.getElementById('kcal-goal').textContent = `z ${goal.kcal}`;
     const ring = document.getElementById('kcal-ring');
     ring.classList.remove('under', 'met', 'over', 'high');
     ring.classList.add(status.band);
@@ -838,19 +1062,20 @@
           .map((entry) => {
             const food = foodById(entry.foodId);
             const name = esc(food ? food.name : 'Neznámá potravina');
-            const macrosFor = food ? foodMacros(food, entry.grams) : { kcal: 0, protein: 0, carbs: 0, fat: 0 };
-            mealKcal += macrosFor.kcal;
-            return `<div class="food-row">
-              <button type="button" class="food-edit" data-edit="${entry.id}">
+            const macrosFor = food ? foodMacros(food, entry.grams) : { kcal: 0, protein: null, carbs: null, fat: null };
+            if (macrosFor.kcal != null) mealKcal += macrosFor.kcal;
+            const bit = (label, value) => `${label} ${value == null ? '—' : value}`;
+            return `<div class="food-row" data-entry="${entry.id}">
+              <div class="food-main">
                 <div>${name}</div>
-                <div class="meta">${entry.grams} g · B ${macrosFor.protein} · S ${macrosFor.carbs} · T ${macrosFor.fat}</div>
-              </button>
+                <div class="meta">${entry.grams} g · ${bit('B', macrosFor.protein)} · ${bit('S', macrosFor.carbs)} · ${bit('T', macrosFor.fat)}</div>
+              </div>
               <div class="food-side">
-                <div class="kcal">${macrosFor.kcal} kcal</div>
-                <div class="row-actions">
-                  <button type="button" class="link-edit" data-edit="${entry.id}">Upravit</button>
-                  <button type="button" class="link-del" data-del="${entry.id}">Smazat</button>
-                </div>
+                <div class="kcal">${macrosFor.kcal == null ? '—' : macrosFor.kcal} kcal</div>
+              </div>
+              <div class="row-pop" hidden>
+                <button type="button" class="pop-rect edit" data-pop-edit="${entry.id}">Upravit</button>
+                <button type="button" class="pop-rect del" data-pop-del="${entry.id}">Smazat</button>
               </div>
             </div>`;
           })
@@ -872,15 +1097,76 @@
         navigate('pridat');
       });
     });
-    box.querySelectorAll('[data-edit]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const entry = state.diary.find((item) => item.id === btn.getAttribute('data-edit'));
+    box.querySelectorAll('.food-row').forEach((row) => bindRowHold(row));
+    box.querySelectorAll('[data-pop-edit]').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        hideRowActions();
+        const entry = state.diary.find((item) => item.id === btn.getAttribute('data-pop-edit'));
         if (entry) openEdit(entry);
       });
     });
-    box.querySelectorAll('[data-del]').forEach((btn) => {
-      btn.addEventListener('click', () => deleteEntry(btn.getAttribute('data-del')));
+    box.querySelectorAll('[data-pop-del]').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        hideRowActions();
+        deleteEntry(btn.getAttribute('data-pop-del'));
+      });
     });
+  }
+
+  function hideRowActions() {
+    document.querySelectorAll('.row-pop').forEach((pop) => {
+      pop.hidden = true;
+    });
+    document.querySelectorAll('.food-row.armed').forEach((row) => row.classList.remove('armed'));
+  }
+
+  function showRowActions(row) {
+    hideRowActions();
+    const pop = row.querySelector('.row-pop');
+    if (!pop) return;
+    pop.hidden = false;
+    row.classList.add('armed');
+  }
+
+  function cancelHold() {
+    if (hold && hold.timer) clearTimeout(hold.timer);
+    hold = null;
+  }
+
+  function bindRowHold(row) {
+    row.addEventListener('pointerdown', (event) => {
+      if (event.target.closest('.row-pop')) return;
+      if (row.classList.contains('armed')) {
+        hideRowActions();
+        return;
+      }
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      cancelHold();
+      const gen = ++pressSerial;
+      const timer = setTimeout(() => {
+        if (!hold || hold.gen !== gen) return;
+        hold = null;
+        showRowActions(row);
+        if (navigator.vibrate) {
+          try { navigator.vibrate(12); } catch (_) {}
+        }
+      }, 500);
+      hold = { gen, timer, x: event.clientX, y: event.clientY, row };
+      try { row.setPointerCapture(event.pointerId); } catch (_) {}
+    });
+    row.addEventListener('pointermove', (event) => {
+      if (!hold || hold.row !== row) return;
+      if (Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > 12) cancelHold();
+    });
+    const end = (event) => {
+      if (hold && hold.row === row) cancelHold();
+      try { row.releasePointerCapture(event.pointerId); } catch (_) {}
+    };
+    row.addEventListener('pointerup', end);
+    row.addEventListener('pointercancel', end);
+    row.addEventListener('contextmenu', (event) => event.preventDefault());
   }
 
   function renderMikro() {
@@ -948,38 +1234,60 @@
       .join('');
   }
 
-  function renderPridat() {
-    paintDate();
-    document.querySelectorAll('.meal-pick button').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.meal === addMeal);
-    });
-    document.getElementById('add-target').textContent =
-      `Zapisuješ do ${formatDate(state.selectedDate)} · ${KCAL.mealLabels[addMeal]}. Nejdřív zvolíš gramy.`;
+  function foodCard(food, remote) {
+    const pack = food.package_g ? ` · balení ${food.package_g} g` : '';
+    const own = food.custom ? ' · vlastní' : '';
+    const source = remote ? ' · Open Food Facts' : own;
+    const missing = food.kcal == null;
+    const kcal = missing ? 'bez kcal' : `${food.kcal} kcal/100 g`;
+    const macros = missing
+      ? 'Open Food Facts u tohohle nemá výživu na 100 g'
+      : `B ${food.protein == null ? '—' : food.protein} · S ${food.carbs == null ? '—' : food.carbs} · T ${food.fat == null ? '—' : food.fat}${pack}${source}`;
+    const attr = remote ? `data-off="${esc(food.id)}"` : `data-food="${esc(food.id)}"`;
+    const edit = remote || food.off
+      ? ''
+      : `<button type="button" class="food-edit-link" data-edit-food="${esc(food.id)}">Upravit</button>`;
+    return `<div class="food-pick-row">
+      <button type="button" class="food-pick${remote ? ' off' : ''}${missing ? ' missing' : ''}" ${attr}>
+        <div>${esc(food.name)}</div>
+        <div class="right">${kcal}</div>
+        <div class="sub">${macros}</div>
+      </button>
+      ${edit}
+    </div>`;
+  }
+
+  function paintFoodList(remote) {
     const query = (document.getElementById('food-search').value || '').trim().toLowerCase();
-    const foods = catalog().filter((food) => !query || food.name.toLowerCase().includes(query));
+    const local = catalog().filter((food) => !query || food.name.toLowerCase().includes(query));
+    const known = new Set(local.map((food) => food.barcode).filter(Boolean));
+    const extra = (remote || []).filter((food) => food.barcode && !known.has(food.barcode));
+    extra.forEach((food) => shownOff.set(food.id, food));
     const root = document.getElementById('food-results');
-    if (!foods.length) {
-      root.innerHTML = '<p class="note">Nic takového nemám. Přidej si vlastní potravinu.</p>';
+    if (!local.length && !extra.length) {
+      root.innerHTML = query.length >= 2
+        ? '<p class="note">Nic v telefonu. Když Open Food Facts něco najde, objeví se to tady.</p>'
+        : '<p class="note">Nic takového nemám. Přidej si vlastní potravinu.</p>';
       return;
     }
-    root.innerHTML = foods
-      .map((food) => {
-        const pack = food.package_g ? ` · balení ${food.package_g} g` : '';
-        const own = food.custom ? ' · vlastní' : '';
-        return `<div class="food-pick-row">
-          <button type="button" class="food-pick" data-food="${esc(food.id)}">
-            <div>${esc(food.name)}</div>
-            <div class="right">${food.kcal} kcal/100 g</div>
-            <div class="sub">B ${food.protein} · S ${food.carbs} · T ${food.fat}${pack}${own}</div>
-          </button>
-          <button type="button" class="food-edit-link" data-edit-food="${food.id}">Upravit</button>
-        </div>`;
-      })
-      .join('');
+    root.innerHTML = local.map((food) => foodCard(food, false)).join('')
+      + extra.map((food) => foodCard(food, true)).join('');
     root.querySelectorAll('[data-food]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const food = foodById(btn.dataset.food);
         if (food) openAdd(food);
+      });
+    });
+    root.querySelectorAll('[data-off]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const food = shownOff.get(btn.dataset.off) || sessionFoods.get(btn.dataset.off) || foodById(btn.dataset.off);
+        if (!food) return;
+        if (food.kcal == null) {
+          explainMissing(food);
+          return;
+        }
+        sessionFoods.set(food.id, food);
+        openAdd(food);
       });
     });
     root.querySelectorAll('[data-edit-food]').forEach((btn) => {
@@ -988,6 +1296,61 @@
         if (food) openFoodForm(food);
       });
     });
+  }
+
+  function scheduleOff(query) {
+    clearTimeout(offTimer);
+    const trimmed = query.trim();
+    const status = document.getElementById('off-status');
+    if (trimmed.length < 2) {
+      if (offAbort) offAbort.abort();
+      offHits = [];
+      offFor = '';
+      if (status) status.textContent = '';
+      return;
+    }
+    if (status) status.textContent = 'Hledám v Open Food Facts…';
+    offTimer = setTimeout(() => { runOff(trimmed); }, 350);
+  }
+
+  async function runOff(query) {
+    const token = ++offToken;
+    if (offAbort) offAbort.abort();
+    const controller = new AbortController();
+    offAbort = controller;
+    const status = document.getElementById('off-status');
+    try {
+      const foods = await searchOff(query, controller.signal);
+      if (token !== offToken) return;
+      offHits = foods;
+      offFor = query;
+      const current = (document.getElementById('food-search').value || '').trim();
+      if (current.toLowerCase() !== query.toLowerCase()) return;
+      const known = new Set(catalog().map((food) => food.barcode).filter(Boolean));
+      const fresh = foods.filter((food) => !known.has(food.barcode));
+      paintFoodList(foods);
+      if (status) {
+        status.textContent = fresh.length
+          ? 'Níže jsou i výrobky z Open Food Facts.'
+          : 'V Open Food Facts nic dalšího.';
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      if (token !== offToken) return;
+      if (status) status.textContent = 'Open Food Facts teď neodpovídá.';
+    }
+  }
+
+  function renderPridat() {
+    paintDate();
+    document.querySelectorAll('.meal-pick button').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.meal === addMeal);
+    });
+    document.getElementById('add-target').textContent =
+      `Zapisuješ do ${formatDate(state.selectedDate)} · ${KCAL.mealLabels[addMeal]}. Nejdřív zvolíš gramy.`;
+    const query = (document.getElementById('food-search').value || '').trim();
+    paintFoodList(query.toLowerCase() === offFor.toLowerCase() ? offHits : []);
+    scheduleOff(query);
   }
 
   function renderActive() {
@@ -1002,6 +1365,7 @@
 
   function navigate(name) {
     if (!['dnes', 'mikro', 'zasoby', 'pridat'].includes(name)) name = 'dnes';
+    hideRowActions();
     if (name !== 'pridat') stopScan();
     history.replaceState(null, '', '#' + name);
     document.querySelectorAll('.screen').forEach((screen) => {
@@ -1110,8 +1474,13 @@
     event.target.value = '';
   });
 
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('.row-pop') || event.target.closest('.food-row')) return;
+    hideRowActions();
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
+    hideRowActions();
     if (!document.getElementById('amount-back').hidden) closeAmount();
     else if (!document.getElementById('food-back').hidden) closeFoodForm();
   });
