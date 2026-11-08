@@ -508,6 +508,13 @@
     return foods;
   }
 
+  function preferQuery(foods, query) {
+    const q = query.trim().toLowerCase();
+    if (q.length < 2) return foods;
+    const named = foods.filter((food) => food.name.toLowerCase().includes(q));
+    return named.length ? named : foods;
+  }
+
   function explainMissing(food) {
     toast(`${food.name}: Open Food Facts nemá kcal na 100 g, takže to nepřidám.`, 3800);
   }
@@ -1320,7 +1327,7 @@
     offAbort = controller;
     const status = document.getElementById('off-status');
     try {
-      const foods = await searchOff(query, controller.signal);
+      const foods = preferQuery(await searchOff(query, controller.signal), query);
       if (token !== offToken) return;
       offHits = foods;
       offFor = query;
