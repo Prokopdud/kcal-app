@@ -12,16 +12,44 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon-180.png" />
   <link rel="icon" href="icon-192.png" />
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="styles.css?v=6" />
 </head>
 <body>
   <div class="phone" role="application" aria-label="Kcal">
     <header class="topbar">
       <div class="brand">Kcal</div>
-      <div class="date-pill" id="date-pill">…</div>
+      <div class="top-actions">
+        <button type="button" id="open-settings" class="top-link" hidden>Nastavení</button>
+        <div class="date-pill" id="date-pill" hidden>…</div>
+      </div>
     </header>
 
     <main class="screens">
+      <section class="screen active" id="screen-auth">
+        <div class="card auth-card">
+          <h2 id="auth-title">Přihlášení</h2>
+          <p class="note" id="auth-lead">Deník, potraviny a cíle se ukládají k tvému účtu.</p>
+          <p class="auth-error" id="auth-error" hidden></p>
+          <p class="auth-info" id="auth-info" hidden></p>
+          <form id="auth-form" novalidate>
+            <label class="field" id="auth-email-field">E-mail
+              <input id="auth-email" type="email" autocomplete="username" inputmode="email" />
+            </label>
+            <label class="field" id="auth-password-field"><span id="auth-password-label">Heslo</span>
+              <input id="auth-password" type="password" autocomplete="current-password" />
+            </label>
+            <label class="field" id="auth-password2-field" hidden>Heslo znovu
+              <input id="auth-password2" type="password" autocomplete="new-password" />
+            </label>
+            <button class="btn-primary" id="auth-submit" type="submit">Přihlásit se</button>
+          </form>
+          <div id="auth-links">
+            <button type="button" id="auth-toggle" class="text-btn">Nemám účet — vytvořit</button>
+            <button type="button" id="auth-reset" class="text-btn">Zapomenuté heslo</button>
+          </div>
+        </div>
+      </section>
+
       <!-- Dnes -->
       <section class="screen" id="screen-dnes">
         <div class="card week-card">
@@ -47,13 +75,14 @@
                 <div>
                   <strong id="kcal-total">—</strong>
                   <span id="kcal-total-label">kcal celkem</span>
-                  <span id="kcal-goal" class="kcal-goal">z 2800</span>
+                  <span id="kcal-goal" class="kcal-goal">bez cíle</span>
                 </div>
               </div>
             </div>
             <div class="kcal-side">
-              <h2 id="day-heading">Dnes · trénink</h2>
-              <p id="day-blurb">Cíl 2800 kcal. Makra níž, jídla ve slotech.</p>
+              <h2 id="day-heading">Dnes</h2>
+              <p id="day-blurb">Cíle si nastavíš v Nastavení. Do té doby uvidíš jen to, co jsi snědl.</p>
+              <button type="button" id="set-goals" class="today-link">Nastavit cíle</button>
             </div>
           </div>
           <div class="macros" id="macros" style="margin-top:14px"></div>
@@ -69,7 +98,7 @@
 
       <!-- Zásoby -->
       <section class="screen" id="screen-zasoby">
-        <p class="note">Co máš doma. Klepni na místo.</p>
+        <p class="note">Co máš doma. Klepni na místo. Když smažeš jídlo v deníku, vrátí se množství sem.</p>
         <div class="loc-tabs" role="tablist">
           <button type="button" class="loc-tab active" data-loc="lednice">Lednice</button>
           <button type="button" class="loc-tab" data-loc="mrazak">Mrazák</button>
@@ -116,13 +145,44 @@
               <span id="photo-status">Čtu kód…</span>
             </div>
           </details>
-          <p class="barcode-note">Neznámý kód se dohledá v Open Food Facts. Místní demo EAN: 8594001123452.</p>
+          <p class="barcode-note">Neznámý kód se dohledá v Open Food Facts a uloží se jako tvoje potravina. Zkušební kód v katalogu: 8594001123452.</p>
         </div>
 
         <button type="button" id="new-food" class="add-slot">+ Nová potravina</button>
         <input class="search" id="food-search" type="search" placeholder="Hledej potravinu nebo výrobek…" autocomplete="off" />
         <p class="off-status" id="off-status"></p>
         <div id="food-results"></div>
+      </section>
+
+      <section class="screen" id="screen-nastaveni">
+        <p class="note">Cíle si píšeš sám. Žádná kalkulačka. Když je změníš, od dneška platí nové a starší dny si nechají cíl, který tehdy platil.</p>
+        <form id="goals-form" class="card goals-card" novalidate>
+          <h2>Denní cíle</h2>
+          <p class="note" id="goals-status"></p>
+          <label class="field">Energie (kcal)
+            <input id="goal-kcal" inputmode="decimal" autocomplete="off" />
+          </label>
+          <div class="field-grid">
+            <label class="field">Bílkoviny (g)
+              <input id="goal-p" inputmode="decimal" autocomplete="off" />
+            </label>
+            <label class="field">Sacharidy (g)
+              <input id="goal-c" inputmode="decimal" autocomplete="off" />
+            </label>
+            <label class="field">Tuky (g)
+              <input id="goal-f" inputmode="decimal" autocomplete="off" />
+            </label>
+            <label class="field">Vláknina (g)
+              <input id="goal-fiber" inputmode="decimal" autocomplete="off" placeholder="volitelné" />
+            </label>
+          </div>
+          <button type="submit" class="btn-primary" id="goals-save">Uložit cíle</button>
+        </form>
+        <div class="card account-card">
+          <h2>Účet</h2>
+          <p class="note" id="account-email"></p>
+          <button type="button" id="logout" class="btn-secondary">Odhlásit se</button>
+        </div>
       </section>
     </main>
 
@@ -156,7 +216,7 @@
     <div class="sheet-back" id="food-back" hidden>
       <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="food-title">
         <h3 id="food-title">Nová potravina</h3>
-        <p class="sheet-hint" id="food-hint">Hodnoty na 100 g. Vlastní potravina se uloží jen v tomhle telefonu.</p>
+        <p class="sheet-hint" id="food-hint">Hodnoty na 100 g. Vlastní potravina se uloží k tvému účtu.</p>
         <label class="field">Název
           <input id="food-name" type="text" maxlength="80" autocomplete="off" />
         </label>
@@ -179,14 +239,13 @@
         </label>
         <div class="sheet-actions">
           <button type="button" id="food-cancel" class="btn-secondary">Zrušit</button>
-          <button type="button" id="food-reset" class="btn-secondary" hidden>Původní</button>
           <button type="button" id="food-delete" class="btn-danger" hidden>Smazat</button>
           <button type="button" id="food-save" class="btn-primary">Uložit</button>
         </div>
       </div>
     </div>
 
-    <nav class="bottom-nav" aria-label="Hlavní">
+    <nav class="bottom-nav" id="bottom-nav" aria-label="Hlavní" hidden>
       <button type="button" class="nav-btn active" data-nav="dnes"><span class="ico" aria-hidden="true">◉</span>Dnes</button>
       <button type="button" class="nav-btn" data-nav="mikro"><span class="ico" aria-hidden="true">◎</span>Mikro</button>
       <button type="button" class="nav-btn" data-nav="zasoby"><span class="ico" aria-hidden="true">▦</span>Zásoby</button>
@@ -194,7 +253,8 @@
     </nav>
   </div>
 
-  <script src="data.js?v=5"></script>
-  <script src="app.js?v=5"></script>
+  <script src="data.js?v=6"></script>
+  <script src="config.js?v=6"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

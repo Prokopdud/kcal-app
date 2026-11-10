@@ -531,3 +531,27 @@ body {
   color: var(--ink); font-size: 1rem; font-weight: 650;
 }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.top-link {
+  color: var(--primary); font-size: 0.82rem; font-weight: 750;
+  padding: 6px 10px; border-radius: 999px;
+}
+.top-link.active { background: var(--primary-soft); }
+.top-link[hidden], #date-pill[hidden], #bottom-nav[hidden] { display: none !important; }
+.auth-card h2, .goals-card h2, .account-card h2 { margin: 0 0 8px; font-size: 1.05rem; }
+.auth-error, .auth-info { font-size: 0.82rem; line-height: 1.35; margin: 0 0 10px; }
+.auth-error { color: #dc3d3d; }
+.auth-info { color: var(--ink); }
+.auth-error[hidden], .auth-info[hidden], .field[hidden], #auth-links[hidden], #auth-form[hidden] { display: none !important; }
+.text-btn {
+  display: block; width: 100%; margin-top: 8px; color: var(--primary);
+  font-weight: 750; font-size: 0.84rem; text-align: center; padding: 8px;
+}
+.auth-card .btn-primary, .goals-card .btn-primary { margin-top: 4px; }
+#set-goals { margin-top: 8px; }
+.mini-ring .fg.logged { stroke: var(--primary); }
+.mini-ring .fg.none { stroke: #d5cfc3; }
+#kcal-ring.logged { stroke: var(--primary); }
+#kcal-ring.none { stroke: #d5cfc3; }
+.macro-row .fill.fiber { background: #7c6f9b; }

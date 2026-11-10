@@ -1,7 +1,41 @@
-(function () {
-  const STORAGE_KEY = 'kcal-app-state-v1';
+(async function () {
+  const LEGACY_KEY = 'kcal-app-state-v1';
+  const IMPORT_FLAG = 'kcal-app-import-done-v1';
+  const UI_KEY = 'kcal-app-ui-v1';
+  const APP_ROUTES = ['dnes', 'mikro', 'zasoby', 'pridat', 'nastaveni'];
   const WEEKDAYS = ['Po', 'Ú', 'St', 'Č', 'Pá', 'So', 'Ne'];
   const RING_R = 11;
+
+  const initialHash = location.hash || '';
+  let recoveryPending = initialHash.includes('type=recovery');
+  let pendingAuthError = '';
+  if (initialHash.includes('error=')) {
+    const params = new URLSearchParams(initialHash.replace(/^#/, ''));
+    pendingAuthError = params.get('error_description') || 'Odkaz vypršel. Pošli si nový.';
+  }
+
+  let supabase = null;
+  try {
+    const mod = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/+esm');
+    const cfg = window.KCAL_SUPABASE || {};
+    if (!cfg.url || !cfg.publishableKey) throw new Error('missing config');
+    supabase = mod.createClient(cfg.url, cfg.publishableKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        flowType: 'implicit',
+      },
+    });
+  } catch (err) {
+    console.warn(err);
+    const error = document.getElementById('auth-error');
+    if (error) {
+      error.hidden = false;
+      error.textContent = 'Přihlášení se nenačetlo. Zkontroluj připojení a obnov stránku.';
+    }
+    return;
+  }
 
   let addMeal = 'obed';
   let pantryLoc = 'lednice';
@@ -9,11 +43,18 @@
     selectedDate: null,
     openedOn: null,
     diary: [],
-    customFoods: [],
-    foodOverrides: {},
+    goals: [],
+    pantry: [],
+    ready: false,
   };
+  let dbFoods = [];
+  let sessionUser = null;
+  let appUserId = null;
+  let activeLoad = null;
+  let authMode = 'login';
   let amountCtx = null;
   let foodCtx = null;
+  let saving = false;
 
   let mediaStream = null;
   let detectTimer = null;
@@ -88,38 +129,105 @@
 
   function num(value) {
     if (typeof value === 'number') return value;
-    if (value == null) return NaN;
+    if (value == null || value === '') return NaN;
     return parseFloat(String(value).replace(',', '.').trim());
   }
 
-  function scaled(value, grams, digits) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-    return round(value * (grams / 100), digits);
+  function fold(value) {
+    return String(value || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
   }
 
-  function foodMacros(food, grams) {
+  function normalizeBarcode(code) {
+    const cleaned = String(code || '').replace(/\D/g, '');
+    return /^[0-9]{6,14}$/.test(cleaned) ? cleaned : '';
+  }
+
+  function positiveOrNull(value) {
+    const n = num(value);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  }
+
+  function optionalMacro(value) {
+    if (value == null || value === '') return null;
+    const n = num(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function scaled(value, grams, digits) {
+    const n = num(value);
+    if (!Number.isFinite(n)) return null;
+    return round(n * (grams / 100), digits);
+  }
+
+  function scaleMicros(micros, scale, digits) {
+    const out = {};
+    if (!micros || typeof micros !== 'object') return out;
+    for (const [key, value] of Object.entries(micros)) {
+      const n = num(value);
+      if (!Number.isFinite(n)) continue;
+      out[key] = round(n * scale, digits);
+    }
+    return out;
+  }
+
+  function totalsFromPer100(per100, grams) {
+    const scale = grams / 100;
     return {
-      kcal: scaled(food.kcal, grams, 0),
-      protein: scaled(food.protein, grams, 1),
-      carbs: scaled(food.carbs, grams, 1),
-      fat: scaled(food.fat, grams, 1),
-      fiber: scaled(food.fiber, grams, 1),
+      kcal: round(num(per100.kcal) * scale, 2),
+      protein: scaled(per100.protein, grams, 2),
+      carbs: scaled(per100.carbs, grams, 2),
+      fat: scaled(per100.fat, grams, 2),
+      fiber: scaled(per100.fiber, grams, 2),
+      micros: scaleMicros(per100.micros, scale, 4),
+    };
+  }
+
+  function snapshotFromFood(food, grams) {
+    const per100 = {
+      kcal: num(food.kcal),
+      protein: optionalMacro(food.protein),
+      carbs: optionalMacro(food.carbs),
+      fat: optionalMacro(food.fat),
+      fiber: optionalMacro(food.fiber),
+      micros: food.micros && typeof food.micros === 'object' ? food.micros : {},
+    };
+    const scaledTotals = totalsFromPer100(per100, grams);
+    return {
+      food_name_snapshot: String(food.name).slice(0, 200),
+      kcal_per_100g: per100.kcal,
+      protein_per_100g: per100.protein,
+      carbs_per_100g: per100.carbs,
+      fat_per_100g: per100.fat,
+      fiber_per_100g: per100.fiber,
+      micros_per_100g: per100.micros,
+      kcal: scaledTotals.kcal,
+      protein: scaledTotals.protein,
+      carbs: scaledTotals.carbs,
+      fat: scaledTotals.fat,
+      fiber: scaledTotals.fiber,
+      micros: scaledTotals.micros,
     };
   }
 
   function addNum(sum, value) {
-    return value == null ? sum : sum + value;
+    const n = num(value);
+    return Number.isFinite(n) ? sum + n : sum;
   }
 
   /* Green: at the goal, slack up to about +3% or +80 kcal.
      Orange: a bit over, up to about +10% or +250 kcal.
-     Red: above that. Gray: under the goal, ring filled by eaten/goal. */
-  function dayBand(kcal) {
-    const goal = KCAL.goals.kcal;
-    const eaten = Math.max(0, kcal || 0);
-    if (eaten < goal) {
-      return { band: 'under', fill: goal > 0 ? eaten / goal : 0 };
+     Red: above that. Gray: under the goal. No goal: a short teal arc if anything was logged. */
+  function dayBand(kcal, goalKcal) {
+    const eaten = Math.max(0, Number(kcal) || 0);
+    const goal = Number(goalKcal);
+    if (!Number.isFinite(goal) || goal <= 0) {
+      return eaten > 0 ? { band: 'logged', fill: 0.35 } : { band: 'none', fill: 0 };
     }
+    if (eaten < goal) return { band: 'under', fill: eaten / goal };
     const over = eaten - goal;
     const greenMax = Math.max(80, goal * 0.03);
     const orangeMax = Math.max(250, goal * 0.1);
@@ -132,28 +240,102 @@
     if (band === 'met') return 'v cíli';
     if (band === 'over') return 'trochu nad';
     if (band === 'high') return 'moc';
+    if (band === 'logged' || band === 'none') return 'bez cíle';
     return 'pod cílem';
   }
 
+  function mapDbFood(row) {
+    return {
+      dbId: row.id,
+      id: row.legacy_id || ('db:' + row.id),
+      legacyId: row.legacy_id || null,
+      name: row.name,
+      brand: row.brand || '',
+      barcode: row.barcode || '',
+      kcal: num(row.kcal),
+      protein: optionalMacro(row.protein),
+      carbs: optionalMacro(row.carbs),
+      fat: optionalMacro(row.fat),
+      fiber: optionalMacro(row.fiber),
+      micros: row.micros || {},
+      package_g: positiveOrNull(row.package_g),
+      piece_g: positiveOrNull(row.piece_g),
+      default_serving_g: positiveOrNull(row.default_serving_g) || 100,
+      source: row.source,
+      owned: !!row.owner_id,
+      custom: !!row.owner_id,
+      off: row.source === 'off',
+    };
+  }
+
+  function mapBundled(food) {
+    const id = String(food.id);
+    return {
+      dbId: null,
+      id,
+      legacyId: id,
+      name: food.name,
+      brand: food.brand || '',
+      barcode: food.barcode ? String(food.barcode) : '',
+      kcal: num(food.kcal),
+      protein: optionalMacro(food.protein),
+      carbs: optionalMacro(food.carbs),
+      fat: optionalMacro(food.fat),
+      fiber: optionalMacro(food.fiber),
+      micros: food.micros || {},
+      package_g: positiveOrNull(food.package_g),
+      piece_g: positiveOrNull(food.piece_g),
+      default_serving_g: positiveOrNull(food.default_serving_g) || 100,
+      source: id.startsWith('off:') ? 'off' : 'builtin',
+      owned: false,
+      custom: false,
+      off: id.startsWith('off:'),
+    };
+  }
+
   function catalog() {
-    const base = KCAL.foods.map((food) => {
-      const over = state.foodOverrides[food.id];
-      if (!over) return food;
-      const merged = { ...food, ...over, id: food.id, builtin: true };
-      if (over.package_g == null) delete merged.package_g;
-      return merged;
-    });
-    const saved = state.offFoods || [];
-    const savedIds = new Set(saved.map((food) => food.id));
-    const pending = [];
+    const byLegacy = new Map();
+    const byBarcode = new Map();
+    for (const row of dbFoods) {
+      const food = mapDbFood(row);
+      if (food.legacyId) byLegacy.set(food.legacyId, food);
+      if (food.barcode) byBarcode.set(String(food.barcode), food);
+    }
+    const list = [];
+    const seenDb = new Set();
+    for (const raw of KCAL.foods || []) {
+      const fromDb = byLegacy.get(raw.id) || (raw.barcode && byBarcode.get(String(raw.barcode)));
+      const food = fromDb || mapBundled(raw);
+      list.push(food);
+      if (food.dbId != null) seenDb.add(food.dbId);
+    }
+    const extras = [];
+    for (const row of dbFoods) {
+      if (seenDb.has(row.id)) continue;
+      extras.push(mapDbFood(row));
+      seenDb.add(row.id);
+    }
+    extras.sort((a, b) => a.name.localeCompare(b.name, 'cs'));
+    list.push(...extras);
     sessionFoods.forEach((food) => {
-      if (!savedIds.has(food.id) && food.kcal != null) pending.push(food);
+      if (list.some((item) => item.id === food.id || (food.barcode && item.barcode === food.barcode))) return;
+      list.push(food);
     });
-    return base.concat(state.customFoods, saved, pending);
+    return list;
   }
 
   function foodById(id) {
-    return catalog().find((food) => food.id === id) || null;
+    if (id == null || id === '') return null;
+    const key = String(id);
+    return catalog().find((food) => food.id === key || String(food.dbId) === key || food.legacyId === key) || null;
+  }
+
+  function goalsFor(date) {
+    let best = null;
+    for (const row of state.goals) {
+      if (row.effective_from <= date && (!best || row.effective_from > best.effective_from)) best = row;
+    }
+    return best;
   }
 
   function entriesOn(date) {
@@ -164,26 +346,23 @@
     const options = opts || {};
     const totals = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, micros: {} };
     const rows = entriesOn(date).filter((entry) => entry.id !== options.excludeId);
-    if (options.extra) rows.push(options.extra);
     for (const entry of rows) {
-      const food = foodById(entry.foodId);
-      if (!food) continue;
-      const macros = foodMacros(food, entry.grams);
-      totals.kcal = addNum(totals.kcal, macros.kcal);
-      totals.protein = addNum(totals.protein, macros.protein);
-      totals.carbs = addNum(totals.carbs, macros.carbs);
-      totals.fat = addNum(totals.fat, macros.fat);
-      totals.fiber = addNum(totals.fiber, macros.fiber);
-      const scale = entry.grams / 100;
-      for (const [key, value] of Object.entries(food.micros || {})) {
-        if (typeof value !== 'number') continue;
-        totals.micros[key] = (totals.micros[key] || 0) + value * scale;
+      totals.kcal = addNum(totals.kcal, entry.kcal);
+      totals.protein = addNum(totals.protein, entry.protein);
+      totals.carbs = addNum(totals.carbs, entry.carbs);
+      totals.fat = addNum(totals.fat, entry.fat);
+      totals.fiber = addNum(totals.fiber, entry.fiber);
+      for (const [key, value] of Object.entries(entry.micros || {})) {
+        const n = num(value);
+        if (!Number.isFinite(n)) continue;
+        totals.micros[key] = (totals.micros[key] || 0) + n;
       }
     }
     totals.kcal = round(totals.kcal);
     totals.protein = round(totals.protein, 1);
     totals.carbs = round(totals.carbs, 1);
     totals.fat = round(totals.fat, 1);
+    totals.fiber = round(totals.fiber, 1);
     return totals;
   }
 
@@ -203,138 +382,427 @@
     toast._t = setTimeout(() => el.classList.remove('show'), ms || 2400);
   }
 
-  function persist() {
+  function persistUi() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(UI_KEY, JSON.stringify({
+        selectedDate: state.selectedDate,
+        openedOn: state.openedOn,
+      }));
     } catch (_) {
-      toast('Nepodařilo se uložit do prohlížeče.', 3200);
+      /* the diary itself is in Supabase */
     }
   }
 
-  function sanitizeEntry(entry) {
-    if (!entry || !isISO(entry.date)) return null;
-    if (!KCAL.mealLabels[entry.meal]) return null;
-    const grams = num(entry.grams);
-    if (!entry.foodId || !Number.isFinite(grams) || grams <= 0) return null;
-    return {
-      id: String(entry.id),
-      date: entry.date,
-      meal: entry.meal,
-      foodId: String(entry.foodId),
-      grams: round(grams, 1),
-    };
+  function readLegacy() {
+    try {
+      const raw = localStorage.getItem(LEGACY_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+      return null;
+    }
   }
 
-  function sanitizeFood(food) {
-    if (!food || !food.id || !food.name) return null;
-    const kcal = num(food.kcal);
-    const protein = num(food.protein);
-    const carbs = num(food.carbs);
-    const fat = num(food.fat);
-    if (![kcal, protein, carbs, fat].every((n) => Number.isFinite(n) && n >= 0)) return null;
-    const pack = num(food.package_g);
-    const item = {
-      id: String(food.id),
-      name: String(food.name).slice(0, 80),
-      kcal,
-      protein,
-      carbs,
-      fat,
-      fiber: Number.isFinite(num(food.fiber)) ? num(food.fiber) : 0,
-      custom: true,
-      micros: {},
-      default_serving_g: 100,
-    };
-    if (Number.isFinite(pack) && pack > 0) item.package_g = round(pack, 1);
-    if (food.barcode) item.barcode = String(food.barcode);
-    return item;
-  }
-
-  function sanitizeOff(food) {
-    if (!food || !food.id || !food.name) return null;
-    const kcal = num(food.kcal);
-    if (!Number.isFinite(kcal) || kcal < 0) return null;
-    const macro = (value) => {
-      if (value == null || value === '') return null;
-      const n = num(value);
-      return Number.isFinite(n) && n >= 0 ? n : null;
-    };
-    const item = {
-      id: String(food.id),
-      name: String(food.name).slice(0, 80),
-      off: true,
-      kcal: round(kcal, 1),
-      protein: macro(food.protein),
-      carbs: macro(food.carbs),
-      fat: macro(food.fat),
-      fiber: macro(food.fiber),
-      micros: {},
-      default_serving_g: Number.isFinite(num(food.default_serving_g)) ? num(food.default_serving_g) : 100,
-    };
-    const pack = num(food.package_g);
-    if (Number.isFinite(pack) && pack > 0) item.package_g = round(pack, 1);
-    const piece = num(food.piece_g);
-    if (Number.isFinite(piece) && piece > 0) item.piece_g = round(piece, 1);
-    if (food.barcode) item.barcode = String(food.barcode).replace(/\D/g, '');
-    return item;
-  }
-
-  function storeOffFood(food) {
-    const copy = sanitizeOff(food);
-    if (!copy) return;
-    if (!state.offFoods) state.offFoods = [];
-    const index = state.offFoods.findIndex((item) => item.id === copy.id);
-    if (index >= 0) state.offFoods[index] = copy;
-    else state.offFoods.push(copy);
-    sessionFoods.set(copy.id, copy);
-  }
-
-  function loadState() {
+  function loadUiDate() {
     const today = todayISO();
-    let saved = null;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) saved = JSON.parse(raw);
-    } catch (_) {
-      saved = null;
+      const saved = JSON.parse(localStorage.getItem(UI_KEY) || 'null');
+      if (saved && saved.openedOn === today && isISO(saved.selectedDate)) return saved.selectedDate;
+    } catch (_) {}
+    const legacy = readLegacy();
+    if (legacy && legacy.openedOn === today && isISO(legacy.selectedDate)) return legacy.selectedDate;
+    return today;
+  }
+
+  function hasRealLegacy(saved) {
+    if (!saved) return false;
+    const diary = Array.isArray(saved.diary) ? saved.diary : [];
+    if (diary.some((entry) => entry && entry.id && !/^d\d{1,2}$/.test(String(entry.id)))) return true;
+    if (Array.isArray(saved.customFoods) && saved.customFoods.length) return true;
+    if (Array.isArray(saved.offFoods) && saved.offFoods.length) return true;
+    if (saved.foodOverrides && typeof saved.foodOverrides === 'object' && Object.keys(saved.foodOverrides).length) return true;
+    return false;
+  }
+
+  function cleanImportFood(food) {
+    if (!food || typeof food !== 'object') return null;
+    const copy = { ...food };
+    const code = normalizeBarcode(copy.barcode);
+    if (code) copy.barcode = code;
+    else delete copy.barcode;
+    return copy;
+  }
+
+  async function maybeImport(userId) {
+    if (localStorage.getItem(IMPORT_FLAG)) return null;
+    const saved = readLegacy();
+    if (!hasRealLegacy(saved)) {
+      localStorage.setItem(IMPORT_FLAG, userId);
+      return null;
     }
-    if (saved && Array.isArray(saved.diary)) {
-      const sameDay = saved.openedOn === today;
-      state = {
-        selectedDate: sameDay && isISO(saved.selectedDate) ? saved.selectedDate : today,
-        openedOn: today,
-        diary: saved.diary.map(sanitizeEntry).filter(Boolean),
-        customFoods: (saved.customFoods || []).map(sanitizeFood).filter(Boolean),
-        offFoods: (saved.offFoods || []).map(sanitizeOff).filter(Boolean),
-        foodOverrides: saved.foodOverrides && typeof saved.foodOverrides === 'object' ? saved.foodOverrides : {},
-      };
-      persist();
+    const payload = {
+      diary: saved.diary || [],
+      customFoods: (saved.customFoods || []).map(cleanImportFood).filter(Boolean),
+      offFoods: (saved.offFoods || []).map(cleanImportFood).filter(Boolean),
+      foodOverrides: saved.foodOverrides || {},
+    };
+    const { data, error } = await supabase.rpc('import_local_state', { payload });
+    if (error) throw error;
+    localStorage.setItem(IMPORT_FLAG, userId);
+    return data;
+  }
+
+  function mapGoal(row) {
+    return {
+      id: row.id,
+      effective_from: row.effective_from,
+      kcal: num(row.kcal),
+      protein_g: num(row.protein_g),
+      carbs_g: num(row.carbs_g),
+      fat_g: num(row.fat_g),
+      fiber_g: row.fiber_g == null ? null : num(row.fiber_g),
+    };
+  }
+
+  function mapEntry(row) {
+    const per = (value) => (value == null || value === '' ? null : num(value));
+    return {
+      id: String(row.id),
+      dbId: row.id,
+      date: row.eaten_on,
+      meal: row.meal,
+      foodId: row.food_id == null ? null : String(row.food_id),
+      grams: num(row.grams),
+      name: row.food_name_snapshot,
+      kcal: per(row.kcal),
+      protein: per(row.protein),
+      carbs: per(row.carbs),
+      fat: per(row.fat),
+      fiber: per(row.fiber),
+      micros: row.micros || {},
+      per100: {
+        kcal: per(row.kcal_per_100g),
+        protein: per(row.protein_per_100g),
+        carbs: per(row.carbs_per_100g),
+        fat: per(row.fat_per_100g),
+        fiber: per(row.fiber_per_100g),
+        micros: row.micros_per_100g || {},
+      },
+    };
+  }
+
+  function mapPantry(row) {
+    const embedded = Array.isArray(row.foods) ? row.foods[0] : row.foods;
+    const local = dbFoods.find((item) => item.id === row.food_id);
+    return {
+      id: row.id,
+      foodId: row.food_id,
+      name: (embedded && embedded.name) || (local && local.name) || 'Neznámá potravina',
+      loc: row.loc,
+      qty: num(row.quantity),
+      unit: row.unit,
+      expiry: row.expiry,
+      opened: !!row.opened,
+    };
+  }
+
+  function rememberFood(row) {
+    const index = dbFoods.findIndex((item) => item.id === row.id);
+    if (index >= 0) dbFoods[index] = row;
+    else dbFoods.push(row);
+  }
+
+  async function refreshPantry() {
+    const embedded = await supabase
+      .from('pantry_items')
+      .select('id, loc, quantity, unit, expiry, opened, food_id, foods(name)')
+      .order('id');
+    if (!embedded.error) {
+      state.pantry = (embedded.data || []).map(mapPantry);
       return;
     }
-    state = {
-      selectedDate: today,
-      openedOn: today,
-      diary: (KCAL.sampleDiary || []).map((entry) => ({ ...entry })),
-      customFoods: [],
-      offFoods: [],
-      foodOverrides: {},
-    };
-    persist();
+    const plain = await supabase
+      .from('pantry_items')
+      .select('id, loc, quantity, unit, expiry, opened, food_id')
+      .order('id');
+    if (plain.error) throw plain.error;
+    state.pantry = (plain.data || []).map(mapPantry);
   }
 
-  function nextDiaryId() {
-    let max = 100;
-    for (const entry of state.diary) {
-      const match = /^d(\d+)$/.exec(entry.id);
-      if (match) max = Math.max(max, Number(match[1]) + 1);
+  async function loadAll(session) {
+    let imported = null;
+    try {
+      imported = await maybeImport(session.user.id);
+    } catch (err) {
+      console.warn(err);
+      toast('Starý deník z prohlížeče se nepodařilo přenést. Obnov stránku a zkus to znovu.', 4200);
     }
-    return 'd' + max;
+    const [foodsRes, diaryRes, goalsRes] = await Promise.all([
+      supabase.from('foods').select('*').order('name'),
+      supabase.from('diary_entries').select('*').order('id', { ascending: true }),
+      supabase.from('user_goals').select('id, effective_from, kcal, protein_g, carbs_g, fat_g, fiber_g').order('effective_from'),
+    ]);
+    if (foodsRes.error) throw foodsRes.error;
+    if (diaryRes.error) throw diaryRes.error;
+    if (goalsRes.error) throw goalsRes.error;
+    dbFoods = foodsRes.data || [];
+    state.diary = (diaryRes.data || []).map(mapEntry);
+    state.goals = (goalsRes.data || []).map(mapGoal);
+    await refreshPantry();
+    const today = todayISO();
+    state.selectedDate = loadUiDate();
+    state.openedOn = today;
+    state.ready = true;
+    if (imported && Number(imported.entries_imported) > 0) {
+      toast(`Přenesený deník: ${imported.entries_imported} zápisů.`, 3600);
+    } else if (imported && Number(imported.foods_upserted) > 0) {
+      toast('Vlastní potraviny jsou v účtu.', 3200);
+    }
   }
+
+  async function ensureFoodRow(food) {
+    if (!food) throw new Error('missing food');
+    if (food.dbId) return food.dbId;
+    const userId = sessionUser && sessionUser.id;
+    if (!userId) throw new Error('no session');
+    const legacy = food.legacyId || (food.id && !String(food.id).startsWith('db:') ? String(food.id) : null);
+    const barcode = normalizeBarcode(food.barcode);
+    const owned = dbFoods.find((row) => row.owner_id && (
+      (legacy && row.legacy_id === legacy) || (barcode && row.barcode === barcode)
+    ));
+    if (owned) return owned.id;
+    const shared = dbFoods.find((row) => !row.owner_id && legacy && row.legacy_id === legacy);
+    if (shared && !food.off && food.source !== 'off') return shared.id;
+    const source = food.off || (legacy && String(legacy).startsWith('off:')) ? 'off' : 'manual';
+    const payload = {
+      owner_id: userId,
+      source,
+      legacy_id: legacy,
+      barcode: barcode || null,
+      name: String(food.name || '').trim().slice(0, 80),
+      kcal: num(food.kcal),
+      protein: optionalMacro(food.protein),
+      carbs: optionalMacro(food.carbs),
+      fat: optionalMacro(food.fat),
+      fiber: optionalMacro(food.fiber),
+      micros: food.micros && typeof food.micros === 'object' ? food.micros : {},
+      package_g: positiveOrNull(food.package_g),
+      piece_g: positiveOrNull(food.piece_g),
+      default_serving_g: positiveOrNull(food.default_serving_g) || 100,
+    };
+    if (!payload.name || !Number.isFinite(payload.kcal)) throw new Error('invalid food');
+    const { data, error } = await supabase.from('foods').insert(payload).select('*').single();
+    if (error) {
+      if (error.code === '23505') {
+        const { data: rows, error: readError } = await supabase.from('foods').select('*').eq('owner_id', userId);
+        if (readError) throw error;
+        for (const row of rows || []) rememberFood(row);
+        const again = (rows || []).find((row) => (legacy && row.legacy_id === legacy) || (barcode && row.barcode === barcode));
+        if (again) return again.id;
+      }
+      throw error;
+    }
+    rememberFood(data);
+    if (food.id) sessionFoods.delete(food.id);
+    return data.id;
+  }
+
+  function redirectUrl() {
+    const url = new URL(location.href);
+    url.hash = '';
+    url.search = '';
+    return url.origin + url.pathname;
+  }
+
+  function czechAuthError(err) {
+    const code = String((err && (err.code || err.error_code)) || '');
+    const msg = String((err && err.message) || '');
+    const hay = (code + ' ' + msg).toLowerCase();
+    if (code === 'password_mismatch') return 'Hesla se neshodují.';
+    if (hay.includes('invalid_credentials') || hay.includes('invalid login')) return 'E-mail nebo heslo nesedí.';
+    if (hay.includes('email_not_confirmed') || hay.includes('not confirmed')) return 'Nejdřív potvrď e-mail, pak se přihlas.';
+    if (hay.includes('user_already_exists') || hay.includes('already registered') || hay.includes('already been registered')) {
+      return 'Účet s tímhle e-mailem už existuje. Přihlas se.';
+    }
+    if (hay.includes('email_address_not_authorized')) return 'Na tuhle adresu teď nejde poslat e-mail.';
+    if (hay.includes('over_email_send_rate_limit') || hay.includes('email rate limit')) return 'E-mailů bylo moc najednou. Zkus to za chvíli.';
+    if (hay.includes('email_address_invalid') || (hay.includes('invalid') && hay.includes('email'))) return 'E-mail nevypadá správně.';
+    if (hay.includes('weak_password') || (hay.includes('password') && (hay.includes('short') || hay.includes('least') || hay.includes('6')))) {
+      return 'Heslo musí mít aspoň 6 znaků.';
+    }
+    if (hay.includes('redirect')) return 'Tahle adresa není v Supabase povolená jako návrat z e-mailu.';
+    return 'Nepovedlo se to. Zkus to znovu.';
+  }
+
+  function showAuthError(message) {
+    const error = document.getElementById('auth-error');
+    const info = document.getElementById('auth-info');
+    if (info) info.hidden = true;
+    if (!error) return;
+    error.hidden = !message;
+    error.textContent = message || '';
+  }
+
+  function showAuthInfo(message) {
+    const error = document.getElementById('auth-error');
+    const info = document.getElementById('auth-info');
+    if (error) error.hidden = true;
+    if (!info) return;
+    info.hidden = !message;
+    info.textContent = message || '';
+  }
+
+  function showAuthMode(mode) {
+    authMode = mode;
+    const titles = {
+      login: 'Přihlášení',
+      signup: 'Nový účet',
+      reset: 'Zapomenuté heslo',
+      recovery: 'Nové heslo',
+    };
+    const leads = {
+      login: 'Deník, potraviny a cíle se ukládají k tvému účtu.',
+      signup: 'Po odeslání přijde e-mail s odkazem. Heslo má aspoň 6 znaků.',
+      reset: 'Pošleme odkaz na nové heslo. Otevři ho v tomhle prohlížeči.',
+      recovery: 'Nastav si nové heslo k tomuto účtu.',
+    };
+    const submits = {
+      login: 'Přihlásit se',
+      signup: 'Vytvořit účet',
+      reset: 'Poslat odkaz',
+      recovery: 'Uložit heslo',
+    };
+    document.getElementById('auth-title').textContent = titles[mode];
+    document.getElementById('auth-lead').textContent = leads[mode];
+    document.getElementById('auth-form').hidden = false;
+    document.getElementById('auth-links').hidden = mode === 'recovery';
+    document.getElementById('auth-email-field').hidden = mode === 'recovery';
+    document.getElementById('auth-password-field').hidden = mode === 'reset';
+    document.getElementById('auth-password2-field').hidden = mode !== 'signup' && mode !== 'recovery';
+    document.getElementById('auth-submit').textContent = submits[mode];
+    document.getElementById('auth-submit').disabled = false;
+    const password = document.getElementById('auth-password');
+    password.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+    password.placeholder = '';
+    document.getElementById('auth-password-label').textContent = mode === 'recovery' ? 'Nové heslo' : 'Heslo';
+    const toggle = document.getElementById('auth-toggle');
+    const reset = document.getElementById('auth-reset');
+    if (mode === 'login') {
+      toggle.hidden = false;
+      toggle.textContent = 'Nemám účet — vytvořit';
+      reset.hidden = false;
+      reset.textContent = 'Zapomenuté heslo';
+    } else if (mode === 'signup') {
+      toggle.hidden = false;
+      toggle.textContent = 'Už účet mám — přihlásit';
+      reset.hidden = true;
+    } else if (mode === 'reset') {
+      toggle.hidden = false;
+      toggle.textContent = 'Zpět na přihlášení';
+      reset.hidden = true;
+    }
+    showShell('auth');
+  }
+
+  function showLoading(message) {
+    document.getElementById('auth-title').textContent = message;
+    document.getElementById('auth-lead').textContent = 'Chvilku.';
+    document.getElementById('auth-form').hidden = true;
+    document.getElementById('auth-links').hidden = true;
+    showAuthError('');
+    showShell('auth');
+  }
+
+  function showShell(mode) {
+    const loggedIn = mode === 'app';
+    document.getElementById('bottom-nav').hidden = !loggedIn;
+    document.getElementById('open-settings').hidden = !loggedIn;
+    document.getElementById('date-pill').hidden = !loggedIn;
+    if (!loggedIn) {
+      document.querySelectorAll('.screen').forEach((screen) => {
+        screen.classList.toggle('active', screen.id === 'screen-auth');
+      });
+    }
+  }
+
+  function routeFromHash() {
+    const raw = (location.hash || '').replace(/^#/, '');
+    if (!raw || raw.includes('=') || raw.includes('&')) return 'dnes';
+    return APP_ROUTES.includes(raw) ? raw : 'dnes';
+  }
+
+  function cleanAuthHash() {
+    const hash = location.hash || '';
+    if (!(hash.includes('access_token') || hash.includes('error=') || hash.includes('refresh_token'))) return;
+    const route = recoveryPending ? '' : '#' + routeFromHash();
+    history.replaceState(null, '', location.pathname + location.search + route);
+  }
+
+  async function enterApp(session) {
+    if (!session || !session.user || recoveryPending) return;
+    if (appUserId === session.user.id && state.ready) {
+      showShell('app');
+      navigate(routeFromHash());
+      return;
+    }
+    if (activeLoad) return activeLoad;
+    activeLoad = (async () => {
+      sessionUser = session.user;
+      showLoading('Načítám deník…');
+      try {
+        await loadAll(session);
+        appUserId = session.user.id;
+        cleanAuthHash();
+        showShell('app');
+        navigate(routeFromHash());
+      } catch (err) {
+        console.warn(err);
+        state.ready = false;
+        appUserId = null;
+        showAuthMode('login');
+        showAuthError('Deník se nepodařilo načíst. Zkus to znovu.');
+      } finally {
+        activeLoad = null;
+      }
+    })();
+    return activeLoad;
+  }
+
+  function onAuth(event, session) {
+    cleanAuthHash();
+    if (recoveryPending || event === 'PASSWORD_RECOVERY') {
+      recoveryPending = true;
+      sessionUser = session ? session.user : sessionUser;
+      showAuthMode('recovery');
+      return;
+    }
+    if (!session) {
+      appUserId = null;
+      sessionUser = null;
+      state.ready = false;
+      state.diary = [];
+      state.goals = [];
+      state.pantry = [];
+      dbFoods = [];
+      showAuthMode(authMode === 'signup' || authMode === 'reset' ? authMode : 'login');
+      if (pendingAuthError) {
+        showAuthError(pendingAuthError);
+        pendingAuthError = '';
+      }
+      return;
+    }
+    void enterApp(session);
+  }
+
+  supabase.auth.onAuthStateChange((event, session) => {
+    setTimeout(() => onAuth(event, session), 0);
+  });
 
   function setSelectedDate(iso) {
     if (!isISO(iso)) return;
     state.selectedDate = iso;
-    persist();
+    persistUi();
     closeAmount();
     const active = document.querySelector('.screen.active');
     const name = active ? active.id.replace('screen-', '') : 'dnes';
@@ -346,7 +814,8 @@
   }
 
   function paintDate() {
-    document.getElementById('date-pill').textContent = formatDate(state.selectedDate);
+    const pill = document.getElementById('date-pill');
+    if (pill) pill.textContent = formatDate(state.selectedDate);
     const input = document.getElementById('date-input');
     if (input && document.activeElement !== input) input.value = state.selectedDate;
     const jump = document.getElementById('jump-today');
@@ -366,7 +835,7 @@
   }
 
   function findByBarcode(code) {
-    const cleaned = String(code || '').replace(/\s+/g, '');
+    const cleaned = normalizeBarcode(code) || String(code || '').replace(/\s+/g, '');
     return catalog().find((food) => food.barcode && food.barcode === cleaned) || null;
   }
 
@@ -445,7 +914,7 @@
 
   function mapOffProduct(product) {
     if (!product) return null;
-    const code = String(product.code || '').replace(/\D/g, '');
+    const code = normalizeBarcode(product.code);
     const name = offName(product);
     if (!code || !name) return null;
     const nutrition = offNutrition(product.nutriments);
@@ -453,9 +922,14 @@
     const piece = servingGrams(product);
     const food = {
       id: 'off:' + code,
+      legacyId: 'off:' + code,
+      dbId: null,
       name,
       barcode: code,
       off: true,
+      owned: false,
+      custom: false,
+      source: 'off',
       micros: {},
       kcal: nutrition ? nutrition.kcal : null,
       protein: nutrition ? nutrition.protein : null,
@@ -509,9 +983,9 @@
   }
 
   function preferQuery(foods, query) {
-    const q = query.trim().toLowerCase();
+    const q = fold(query.trim());
     if (q.length < 2) return foods;
-    const named = foods.filter((food) => food.name.toLowerCase().includes(q));
+    const named = foods.filter((food) => fold(food.name).includes(q));
     return named.length ? named : foods;
   }
 
@@ -523,6 +997,7 @@
     openAmount({
       mode: 'add',
       foodId: food.id,
+      food,
       grams: food.default_serving_g || 100,
       meal: addMeal,
       date: state.selectedDate,
@@ -537,30 +1012,41 @@
       grams: entry.grams,
       meal: entry.meal,
       date: entry.date,
+      name: entry.name,
+      per100: entry.per100,
     });
   }
 
   function openAmount(ctx) {
-    const food = foodById(ctx.foodId);
-    if (!food) {
+    const food = ctx.food || (ctx.foodId ? foodById(ctx.foodId) : null);
+    const per100 = ctx.per100 || (food ? {
+      kcal: food.kcal,
+      protein: food.protein,
+      carbs: food.carbs,
+      fat: food.fat,
+      fiber: food.fiber,
+      micros: food.micros || {},
+    } : null);
+    const name = (food && food.name) || ctx.name;
+    if (!name || !per100 || !Number.isFinite(num(per100.kcal))) {
       toast('Tu potravinu už v katalogu nemám.');
       return;
     }
-    amountCtx = ctx;
-    document.getElementById('amount-title').textContent = food.name;
+    amountCtx = { ...ctx, food, per100, name };
+    document.getElementById('amount-title').textContent = name;
     document.getElementById('amount-sub').textContent =
-      `${KCAL.mealLabels[ctx.meal]} · ${formatDate(ctx.date)} · ${food.kcal} kcal / 100 g`;
+      `${KCAL.mealLabels[ctx.meal]} · ${formatDate(ctx.date)} · ${per100.kcal} kcal / 100 g`;
     const input = document.getElementById('gram-input');
     input.value = String(ctx.grams);
     const pack = document.getElementById('pack-btn');
-    if (food.package_g > 0) {
+    if (food && food.package_g > 0) {
       pack.hidden = false;
       pack.textContent = `Celé balení · ${food.package_g} g`;
     } else {
       pack.hidden = true;
     }
     const piece = document.getElementById('piece-btn');
-    if (food.piece_g > 0) {
+    if (food && food.piece_g > 0) {
       piece.hidden = false;
       piece.textContent = `1 kus · ${food.piece_g} g`;
     } else {
@@ -568,6 +1054,7 @@
     }
     const save = document.getElementById('amount-save');
     save.textContent = ctx.mode === 'edit' ? 'Uložit' : 'Přidat';
+    save.disabled = false;
     document.getElementById('amount-delete').hidden = ctx.mode !== 'edit';
     document.getElementById('amount-back').hidden = false;
     paintPreview();
@@ -591,25 +1078,26 @@
     const root = document.getElementById('amount-preview');
     const save = document.getElementById('amount-save');
     if (!amountCtx) return;
-    const food = foodById(amountCtx.foodId);
     const grams = currentGrams();
-    if (!food || grams == null) {
+    if (!amountCtx.per100 || grams == null) {
       root.innerHTML = '<p class="preview-empty">Napiš gramy, ať vidíš, co to udělá.</p>';
       save.disabled = true;
       return;
     }
-    save.disabled = false;
-    const macros = foodMacros(food, grams);
-    const totals = dayTotals(amountCtx.date, {
+    save.disabled = saving;
+    const macros = totalsFromPer100(amountCtx.per100, grams);
+    const base = dayTotals(amountCtx.date, {
       excludeId: amountCtx.mode === 'edit' ? amountCtx.entryId : null,
-      extra: { foodId: food.id, grams },
     });
-    const goal = KCAL.goals.kcal;
-    const dayLine = `Den pak <b>${totals.kcal}</b> kcal z ${goal}`;
-    const gram = (value) => (value == null ? '—' : `${value} g`);
+    const dayKcal = round(addNum(base.kcal, macros.kcal));
+    const goal = goalsFor(amountCtx.date);
+    const dayLine = goal
+      ? `Den pak <b>${dayKcal}</b> kcal z ${round(goal.kcal)}`
+      : `Den pak <b>${dayKcal}</b> kcal, bez cíle`;
+    const gram = (value) => (value == null ? '—' : `${round(value, 1)} g`);
     root.innerHTML = `
       <div class="preview-kicker">${amountCtx.mode === 'edit' ? 'Po úpravě' : 'Tohle přidáš'}</div>
-      <div class="preview-kcal"><strong>${macros.kcal}</strong> kcal</div>
+      <div class="preview-kcal"><strong>${round(macros.kcal)}</strong> kcal</div>
       <div class="preview-macros">
         <span>B ${gram(macros.protein)}</span>
         <span>S ${gram(macros.carbs)}</span>
@@ -618,73 +1106,115 @@
       <div class="preview-day">${dayLine}</div>`;
   }
 
-  function commitAmount() {
-    if (!amountCtx) return;
+  async function commitAmount() {
+    if (!amountCtx || saving) return;
     const grams = currentGrams();
     if (grams == null) {
       toast('Zadej gramy větší než 0.');
       return;
     }
-    const food = foodById(amountCtx.foodId);
-    if (!food) return;
-    if (amountCtx.mode === 'edit') {
-      const entry = state.diary.find((item) => item.id === amountCtx.entryId);
-      if (!entry) {
-        closeAmount();
-        return;
-      }
-      entry.grams = grams;
-      persist();
-      closeAmount();
-      toast(`Uloženo: ${food.name} (${grams} g)`);
-      renderActive();
+    if (grams > 20000) {
+      toast('Gramů je moc. Nejvýš 20000.');
       return;
     }
-    const meal = amountCtx.meal;
-    if (food.off) storeOffFood(food);
-    state.diary.push({
-      id: nextDiaryId(),
-      date: amountCtx.date,
-      meal,
-      foodId: food.id,
-      grams,
-    });
-    persist();
-    closeAmount();
-    toast(`Přidáno: ${food.name} (${grams} g) → ${KCAL.mealLabels[meal]}`);
-    navigate('dnes');
+    saving = true;
+    document.getElementById('amount-save').disabled = true;
+    try {
+      if (amountCtx.mode === 'edit') {
+        const entry = state.diary.find((item) => item.id === amountCtx.entryId);
+        if (!entry) {
+          closeAmount();
+          return;
+        }
+        const scaledTotals = totalsFromPer100(entry.per100, grams);
+        const { data, error } = await supabase.from('diary_entries').update({
+          grams,
+          kcal: scaledTotals.kcal,
+          protein: scaledTotals.protein,
+          carbs: scaledTotals.carbs,
+          fat: scaledTotals.fat,
+          fiber: scaledTotals.fiber,
+          micros: scaledTotals.micros,
+        }).eq('id', entry.dbId).select('*').single();
+        if (error) throw error;
+        const mapped = mapEntry(data);
+        const index = state.diary.findIndex((item) => item.id === entry.id);
+        if (index >= 0) state.diary[index] = mapped;
+        closeAmount();
+        toast(`Uloženo: ${mapped.name} (${grams} g)`);
+        await refreshPantry();
+        renderActive();
+        return;
+      }
+      const food = amountCtx.food || foodById(amountCtx.foodId);
+      if (!food || !Number.isFinite(num(food.kcal))) {
+        toast('Tahle potravina nemá kcal, takže ji nezapíšu.');
+        return;
+      }
+      const foodId = await ensureFoodRow(food);
+      const fresh = foodById(foodId) || food;
+      const snap = snapshotFromFood(fresh, grams);
+      const { data, error } = await supabase.from('diary_entries').insert({
+        user_id: sessionUser.id,
+        eaten_on: amountCtx.date,
+        meal: amountCtx.meal,
+        food_id: foodId,
+        grams,
+        ...snap,
+      }).select('*').single();
+      if (error) throw error;
+      state.diary.push(mapEntry(data));
+      const meal = amountCtx.meal;
+      closeAmount();
+      toast(`Přidáno: ${fresh.name} (${grams} g) → ${KCAL.mealLabels[meal]}`);
+      await refreshPantry();
+      navigate('dnes');
+    } catch (err) {
+      console.warn(err);
+      toast('Zápis se nepodařilo uložit.', 3400);
+      document.getElementById('amount-save').disabled = false;
+    } finally {
+      saving = false;
+    }
   }
 
-  function deleteEntry(id, skipConfirm) {
+  async function deleteEntry(id, skipConfirm) {
     const entry = state.diary.find((item) => item.id === id);
-    if (!entry) return;
-    const food = foodById(entry.foodId);
-    const name = food ? food.name : 'položku';
+    if (!entry || saving) return;
+    const name = entry.name || 'položku';
     if (!skipConfirm && !window.confirm(`Smazat „${name}“ (${entry.grams} g)?`)) return;
-    state.diary = state.diary.filter((item) => item.id !== id);
-    persist();
-    closeAmount();
-    toast('Smazáno.');
-    renderActive();
+    saving = true;
+    try {
+      const { error } = await supabase.from('diary_entries').delete().eq('id', entry.dbId);
+      if (error) throw error;
+      state.diary = state.diary.filter((item) => item.id !== id);
+      closeAmount();
+      toast('Smazáno.');
+      await refreshPantry();
+      renderActive();
+    } catch (err) {
+      console.warn(err);
+      toast('Smazání se nepovedlo.', 3200);
+    } finally {
+      saving = false;
+    }
   }
 
   function openFoodForm(food) {
-    foodCtx = food ? { id: food.id, custom: !!food.custom, builtin: !food.custom } : { create: true };
+    if (food && !food.owned) {
+      toast('Sdílenou potravinu nejde měnit. Založ si vlastní.', 3200);
+      return;
+    }
+    foodCtx = food ? { id: food.id, dbId: food.dbId, owned: true } : { create: true };
     document.getElementById('food-title').textContent = food ? 'Upravit potravinu' : 'Nová potravina';
     document.getElementById('food-name').value = food ? food.name : '';
-    document.getElementById('food-kcal').value = food ? String(food.kcal) : '';
-    document.getElementById('food-p').value = food ? String(food.protein) : '';
-    document.getElementById('food-c').value = food ? String(food.carbs) : '';
-    document.getElementById('food-f').value = food ? String(food.fat) : '';
+    document.getElementById('food-kcal').value = food && food.kcal != null ? String(food.kcal) : '';
+    document.getElementById('food-p').value = food && food.protein != null ? String(food.protein) : '';
+    document.getElementById('food-c').value = food && food.carbs != null ? String(food.carbs) : '';
+    document.getElementById('food-f').value = food && food.fat != null ? String(food.fat) : '';
     document.getElementById('food-pack').value = food && food.package_g ? String(food.package_g) : '';
-    const hint = document.getElementById('food-hint');
-    hint.textContent = food && !food.custom
-      ? 'Úprava startovní potraviny se uloží v telefonu. Mikronutrienty nechávám původní.'
-      : 'Hodnoty na 100 g. Vlastní potravina se uloží jen v tomhle telefonu. Mikronutrienty u ní nepočítám.';
-    const del = document.getElementById('food-delete');
-    del.hidden = !(food && food.custom);
-    const reset = document.getElementById('food-reset');
-    reset.hidden = !(food && !food.custom && state.foodOverrides[food.id]);
+    document.getElementById('food-hint').textContent = 'Hodnoty na 100 g. Uloží se k tvému účtu.';
+    document.getElementById('food-delete').hidden = !(food && food.owned);
     document.getElementById('food-back').hidden = false;
     document.getElementById('food-name').focus();
   }
@@ -717,92 +1247,90 @@
     return { name, kcal, protein, carbs, fat, package_g: pack };
   }
 
-  function saveFoodForm() {
-    if (!foodCtx) return;
+  async function saveFoodForm() {
+    if (!foodCtx || saving) return;
     const draft = readFoodForm();
     if (draft.error) {
       toast(draft.error, 3200);
       return;
     }
-    if (foodCtx.create) {
-      state.customFoods.push({
-        id: 'u' + Date.now().toString(36),
+    saving = true;
+    try {
+      if (foodCtx.create) {
+        const legacy = 'u' + Date.now().toString(36);
+        const food = {
+          id: legacy,
+          legacyId: legacy,
+          name: draft.name,
+          kcal: draft.kcal,
+          protein: draft.protein,
+          carbs: draft.carbs,
+          fat: draft.fat,
+          fiber: 0,
+          custom: true,
+          owned: true,
+          off: false,
+          source: 'manual',
+          micros: {},
+          default_serving_g: 100,
+          ...(draft.package_g ? { package_g: draft.package_g } : {}),
+        };
+        await ensureFoodRow(food);
+        closeFoodForm();
+        toast(`Uloženo: ${draft.name}`);
+        renderPridat();
+        return;
+      }
+      const patch = {
         name: draft.name,
         kcal: draft.kcal,
         protein: draft.protein,
         carbs: draft.carbs,
         fat: draft.fat,
-        fiber: 0,
-        custom: true,
-        micros: {},
-        default_serving_g: 100,
-        ...(draft.package_g ? { package_g: draft.package_g } : {}),
-      });
-      persist();
-      closeFoodForm();
-      toast(`Uloženo: ${draft.name}`);
-      renderPridat();
-      return;
-    }
-    if (foodCtx.custom) {
-      const food = state.customFoods.find((item) => item.id === foodCtx.id);
-      if (!food) return;
-      food.name = draft.name;
-      food.kcal = draft.kcal;
-      food.protein = draft.protein;
-      food.carbs = draft.carbs;
-      food.fat = draft.fat;
-      if (draft.package_g) food.package_g = draft.package_g;
-      else delete food.package_g;
-      persist();
+        package_g: draft.package_g || null,
+      };
+      const { data, error } = await supabase.from('foods').update(patch).eq('id', foodCtx.dbId).select('*').single();
+      if (error) throw error;
+      rememberFood(data);
       closeFoodForm();
       toast(`Upraveno: ${draft.name}`);
       renderActive();
-      return;
+    } catch (err) {
+      console.warn(err);
+      toast('Potravinu se nepodařilo uložit.', 3200);
+    } finally {
+      saving = false;
     }
-    const override = {
-      name: draft.name,
-      kcal: draft.kcal,
-      protein: draft.protein,
-      carbs: draft.carbs,
-      fat: draft.fat,
-      package_g: draft.package_g,
-    };
-    state.foodOverrides[foodCtx.id] = override;
-    persist();
-    closeFoodForm();
-    toast(`Upraveno: ${draft.name}`);
-    renderActive();
   }
 
-  function deleteCustomFood() {
-    if (!foodCtx || !foodCtx.custom) return;
-    const used = state.diary.some((entry) => entry.foodId === foodCtx.id);
+  async function deleteCustomFood() {
+    if (!foodCtx || !foodCtx.owned || saving) return;
+    const food = foodById(foodCtx.dbId) || foodById(foodCtx.id);
+    if (!food) return;
+    const used = state.diary.some((entry) => entry.foodId === String(food.dbId) || entry.foodId === food.id);
     if (used) {
       toast('Nejdřív ji smaž z deníku — pořád je v nějakém dni.', 3400);
       return;
     }
-    const food = state.customFoods.find((item) => item.id === foodCtx.id);
-    if (!food) return;
     if (!window.confirm(`Smazat potravinu „${food.name}“?`)) return;
-    state.customFoods = state.customFoods.filter((item) => item.id !== foodCtx.id);
-    persist();
-    closeFoodForm();
-    toast('Potravina smazaná.');
-    renderPridat();
-  }
-
-  function resetBuiltinFood() {
-    if (!foodCtx || foodCtx.custom || foodCtx.create) return;
-    delete state.foodOverrides[foodCtx.id];
-    persist();
-    closeFoodForm();
-    toast('Vráceno na původní hodnoty.');
-    renderActive();
+    saving = true;
+    try {
+      const { error } = await supabase.from('foods').delete().eq('id', food.dbId);
+      if (error) throw error;
+      dbFoods = dbFoods.filter((row) => row.id !== food.dbId);
+      closeFoodForm();
+      toast('Potravina smazaná.');
+      renderPridat();
+    } catch (err) {
+      console.warn(err);
+      toast('Nejde smazat. Ještě je v zásobách nebo v receptu.', 3600);
+    } finally {
+      saving = false;
+    }
   }
 
   async function applyBarcode(code) {
-    const cleaned = String(code || '').replace(/\D/g, '');
+    const cleaned = normalizeBarcode(code);
     if (!cleaned) {
       toast('Zadej nebo naskenuj EAN.');
       return;
@@ -1004,7 +1532,8 @@
     root.innerHTML = WEEKDAYS.map((label, index) => {
       const iso = addDays(start, index);
       const kcal = dayTotals(iso).kcal;
-      const status = dayBand(kcal);
+      const goal = goalsFor(iso);
+      const status = dayBand(kcal, goal && goal.kcal);
       const selected = iso === state.selectedDate;
       return `<button type="button" class="day-btn${selected ? ' selected' : ''}" data-date="${iso}" role="option" aria-selected="${selected}" aria-label="${label} ${formatDate(iso)}, ${kcal} kcal, ${bandLabel(status.band)}">
         <span class="mini-ring" aria-hidden="true">
@@ -1026,34 +1555,47 @@
 
   function renderDnes() {
     const totals = dayTotals(state.selectedDate);
-    const goal = KCAL.goals;
-    const status = dayBand(totals.kcal);
+    const goal = goalsFor(state.selectedDate);
+    const status = dayBand(totals.kcal, goal && goal.kcal);
     const today = state.selectedDate === todayISO();
     paintDate();
     renderWeek();
-    document.getElementById('day-heading').textContent = today ? 'Dnes · trénink' : formatDate(state.selectedDate);
-    document.getElementById('day-blurb').textContent = today
-      ? 'Cíl 2800 kcal. Makra níž, jídla ve slotech.'
-      : 'Jiný den. Můžeš dopsat, co už bylo, nebo si jídlo naplánovat.';
+    document.getElementById('day-heading').textContent = today ? 'Dnes' : formatDate(state.selectedDate);
+    const blurb = document.getElementById('day-blurb');
+    const setGoals = document.getElementById('set-goals');
+    if (!goal) {
+      blurb.textContent = today
+        ? 'Cíle ještě nemáš. Bez nich uvidíš, co jsi snědl, ale kroužek se nebarví podle cíle.'
+        : 'Pro tenhle den není nastavený cíl.';
+      if (setGoals) setGoals.hidden = false;
+    } else {
+      blurb.textContent = today
+        ? `Cíl ${round(goal.kcal)} kcal. Makra níž, jídla ve slotech.`
+        : 'Jiný den. Můžeš dopsat, co už bylo, nebo si jídlo naplánovat.';
+      if (setGoals) setGoals.hidden = true;
+    }
     document.getElementById('kcal-total').textContent = String(totals.kcal);
-    document.getElementById('kcal-goal').textContent = `z ${goal.kcal}`;
+    document.getElementById('kcal-goal').textContent = goal ? `z ${round(goal.kcal)}` : 'bez cíle';
     const ring = document.getElementById('kcal-ring');
-    ring.classList.remove('under', 'met', 'over', 'high');
+    ring.classList.remove('under', 'met', 'over', 'high', 'logged', 'none');
     ring.classList.add(status.band);
-    setRing(ring, totals.kcal / goal.kcal);
+    setRing(ring, goal ? totals.kcal / goal.kcal : status.fill);
 
     const macros = [
-      ['p', 'Bílkoviny', totals.protein, goal.protein_g],
-      ['c', 'Sacharidy', totals.carbs, goal.carbs_g],
-      ['f', 'Tuky', totals.fat, goal.fat_g],
+      ['p', 'Bílkoviny', totals.protein, goal ? goal.protein_g : null],
+      ['c', 'Sacharidy', totals.carbs, goal ? goal.carbs_g : null],
+      ['f', 'Tuky', totals.fat, goal ? goal.fat_g : null],
     ];
+    if (goal && goal.fiber_g != null) macros.push(['fiber', 'Vláknina', totals.fiber, goal.fiber_g]);
     document.getElementById('macros').innerHTML = macros
       .map(([cls, label, val, target]) => {
-        const pct = Math.min(100, target ? (val / target) * 100 : 0);
+        const hasTarget = target != null && Number.isFinite(Number(target));
+        const pct = hasTarget && target > 0 ? Math.min(100, (val / target) * 100) : 0;
+        const nums = hasTarget ? `${round(val)}/${round(target)} g` : `${round(val)} g`;
         return `<div class="macro-row">
           <div>${label}</div>
           <div class="bar"><div class="fill ${cls}" style="width:${pct}%"></div></div>
-          <div class="nums">${round(val)}/${target} g</div>
+          <div class="nums">${nums}</div>
         </div>`;
       })
       .join('');
@@ -1067,22 +1609,24 @@
         let mealKcal = 0;
         const rows = items
           .map((entry) => {
-            const food = foodById(entry.foodId);
-            const name = esc(food ? food.name : 'Neznámá potravina');
-            const macrosFor = food ? foodMacros(food, entry.grams) : { kcal: 0, protein: null, carbs: null, fat: null };
-            if (macrosFor.kcal != null) mealKcal += macrosFor.kcal;
+            const name = esc(entry.name || 'Neznámá potravina');
+            const kcal = entry.kcal == null ? null : round(num(entry.kcal));
+            const protein = entry.protein == null ? null : round(num(entry.protein), 1);
+            const carbs = entry.carbs == null ? null : round(num(entry.carbs), 1);
+            const fat = entry.fat == null ? null : round(num(entry.fat), 1);
+            if (kcal != null) mealKcal += kcal;
             const bit = (label, value) => `${label} ${value == null ? '—' : value}`;
-            return `<div class="food-row" data-entry="${entry.id}">
+            return `<div class="food-row" data-entry="${esc(entry.id)}">
               <div class="food-main">
                 <div>${name}</div>
-                <div class="meta">${entry.grams} g · ${bit('B', macrosFor.protein)} · ${bit('S', macrosFor.carbs)} · ${bit('T', macrosFor.fat)}</div>
+                <div class="meta">${entry.grams} g · ${bit('B', protein)} · ${bit('S', carbs)} · ${bit('T', fat)}</div>
               </div>
               <div class="food-side">
-                <div class="kcal">${macrosFor.kcal == null ? '—' : macrosFor.kcal} kcal</div>
+                <div class="kcal">${kcal == null ? '—' : kcal} kcal</div>
               </div>
               <div class="row-pop" hidden>
-                <button type="button" class="pop-rect edit" data-pop-edit="${entry.id}">Upravit</button>
-                <button type="button" class="pop-rect del" data-pop-del="${entry.id}">Smazat</button>
+                <button type="button" class="pop-rect edit" data-pop-edit="${esc(entry.id)}">Upravit</button>
+                <button type="button" class="pop-rect del" data-pop-del="${esc(entry.id)}">Smazat</button>
               </div>
             </div>`;
           })
@@ -1117,7 +1661,7 @@
       btn.addEventListener('click', (event) => {
         event.stopPropagation();
         hideRowActions();
-        deleteEntry(btn.getAttribute('data-pop-del'));
+        void deleteEntry(btn.getAttribute('data-pop-del'));
       });
     });
   }
@@ -1217,7 +1761,7 @@
     document.querySelectorAll('.loc-tab').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.loc === pantryLoc);
     });
-    const list = KCAL.pantry.filter((item) => item.loc === pantryLoc);
+    const list = state.pantry.filter((item) => item.loc === pantryLoc);
     const root = document.getElementById('pantry-list');
     if (!list.length) {
       root.innerHTML = '<p class="note">Tady nic není.</p>';
@@ -1226,14 +1770,20 @@
     const soonLimit = addDays(todayISO(), 4);
     root.innerHTML = list
       .map((item) => {
-        const food = foodById(item.foodId);
-        const name = esc(food ? food.name : 'Neznámá potravina');
-        const soon = item.expiry <= soonLimit;
-        const qty = item.unit === 'ks' ? `${item.qty} ks` : item.unit === 'ml' ? `${item.qty} ml` : `${item.qty} g`;
+        const name = esc(item.name || 'Neznámá potravina');
+        const soon = item.expiry && item.expiry <= soonLimit;
+        const qty = item.unit === 'ks'
+          ? `${round(item.qty, 3)} ks`
+          : item.unit === 'ml'
+            ? `${round(item.qty, 3)} ml`
+            : `${round(item.qty, 3)} g`;
+        const expiry = item.expiry && isISO(item.expiry)
+          ? ` · do ${item.expiry.split('-').reverse().join('.')}`
+          : '';
         return `<div class="pantry-item">
           <div>
             <div>${name}</div>
-            <div class="sub">${qty}${item.opened ? ' · otevřeno' : ''} · do ${item.expiry.split('-').reverse().join('.')}</div>
+            <div class="sub">${qty}${item.opened ? ' · otevřeno' : ''}${expiry}</div>
           </div>
           <div><span class="badge ${soon ? 'soon' : ''}">${soon ? 'brzy' : KCAL.locLabels[item.loc]}</span></div>
         </div>`;
@@ -1241,19 +1791,106 @@
       .join('');
   }
 
+  function fillGoalForm(goal) {
+    document.getElementById('goal-kcal').value = goal ? String(round(goal.kcal)) : '';
+    document.getElementById('goal-p').value = goal ? String(goal.protein_g) : '';
+    document.getElementById('goal-c').value = goal ? String(goal.carbs_g) : '';
+    document.getElementById('goal-f').value = goal ? String(goal.fat_g) : '';
+    document.getElementById('goal-fiber').value = goal && goal.fiber_g != null ? String(goal.fiber_g) : '';
+  }
+
+  function renderNastaveni() {
+    const today = todayISO();
+    const goal = goalsFor(today);
+    const status = document.getElementById('goals-status');
+    const email = sessionUser && sessionUser.email ? sessionUser.email : '';
+    document.getElementById('account-email').textContent = email ? `Přihlášený e-mail: ${email}` : '';
+    if (!goal) {
+      status.textContent = 'Zatím žádný cíl. Vyplň ho a ulož — platí od dneška.';
+    } else if (goal.effective_from === today) {
+      status.textContent = 'Dnešní cíl. Uložení ho přepíše.';
+    } else {
+      status.textContent = `Teď platí cíl od ${formatDate(goal.effective_from)}. Uložení založí nový cíl od dneška, starší dny zůstanou.`;
+    }
+    const form = document.getElementById('goals-form');
+    if (form.contains(document.activeElement)) return;
+    fillGoalForm(goal);
+  }
+
+  function readGoalsForm() {
+    const kcal = num(document.getElementById('goal-kcal').value);
+    const protein = num(document.getElementById('goal-p').value);
+    const carbs = num(document.getElementById('goal-c').value);
+    const fat = num(document.getElementById('goal-f').value);
+    const fiberRaw = document.getElementById('goal-fiber').value.trim();
+    const fiber = fiberRaw === '' ? null : num(fiberRaw);
+    if (!Number.isFinite(kcal) || kcal <= 0 || kcal > 20000) return { error: 'kcal musí být větší než 0.' };
+    if (![protein, carbs, fat].every((n) => Number.isFinite(n) && n >= 0)) return { error: 'Bílkoviny, sacharidy a tuky vyplň číslem od 0.' };
+    if (protein > 1000 || carbs > 2000 || fat > 1000) return { error: 'Některé makro je moc vysoké.' };
+    if (fiber != null && (!Number.isFinite(fiber) || fiber < 0 || fiber > 500)) return { error: 'Vlákninu nech prázdnou, nebo dej číslo od 0.' };
+    return {
+      kcal: round(kcal),
+      protein_g: round(protein, 1),
+      carbs_g: round(carbs, 1),
+      fat_g: round(fat, 1),
+      fiber_g: fiber == null ? null : round(fiber, 1),
+    };
+  }
+
+  async function saveGoals(event) {
+    event.preventDefault();
+    if (saving) return;
+    const parsed = readGoalsForm();
+    if (parsed.error) {
+      toast(parsed.error, 3400);
+      return;
+    }
+    const today = todayISO();
+    const current = state.goals.find((row) => row.effective_from === today);
+    saving = true;
+    document.getElementById('goals-save').disabled = true;
+    try {
+      const payload = {
+        kcal: parsed.kcal,
+        protein_g: parsed.protein_g,
+        carbs_g: parsed.carbs_g,
+        fat_g: parsed.fat_g,
+        fiber_g: parsed.fiber_g,
+      };
+      const result = current
+        ? await supabase.from('user_goals').update(payload).eq('id', current.id).select('id, effective_from, kcal, protein_g, carbs_g, fat_g, fiber_g').single()
+        : await supabase.from('user_goals').insert({
+          ...payload,
+          user_id: sessionUser.id,
+          effective_from: today,
+        }).select('id, effective_from, kcal, protein_g, carbs_g, fat_g, fiber_g').single();
+      if (result.error) throw result.error;
+      const mapped = mapGoal(result.data);
+      state.goals = state.goals.filter((row) => row.id !== mapped.id).concat(mapped);
+      toast('Cíle uložené.');
+      renderNastaveni();
+    } catch (err) {
+      console.warn(err);
+      toast('Cíle se nepodařilo uložit.', 3200);
+    } finally {
+      saving = false;
+      document.getElementById('goals-save').disabled = false;
+    }
+  }
+
   function foodCard(food, remote) {
     const pack = food.package_g ? ` · balení ${food.package_g} g` : '';
-    const own = food.custom ? ' · vlastní' : '';
+    const own = food.owned ? (food.off ? ' · tvoje z Open Food Facts' : ' · vlastní') : '';
     const source = remote ? ' · Open Food Facts' : own;
-    const missing = food.kcal == null;
+    const missing = food.kcal == null || !Number.isFinite(num(food.kcal));
     const kcal = missing ? 'bez kcal' : `${food.kcal} kcal/100 g`;
     const macros = missing
       ? 'Open Food Facts u tohohle nemá výživu na 100 g'
       : `B ${food.protein == null ? '—' : food.protein} · S ${food.carbs == null ? '—' : food.carbs} · T ${food.fat == null ? '—' : food.fat}${pack}${source}`;
     const attr = remote ? `data-off="${esc(food.id)}"` : `data-food="${esc(food.id)}"`;
-    const edit = remote || food.off
-      ? ''
-      : `<button type="button" class="food-edit-link" data-edit-food="${esc(food.id)}">Upravit</button>`;
+    const edit = !remote && food.owned
+      ? `<button type="button" class="food-edit-link" data-edit-food="${esc(food.id)}">Upravit</button>`
+      : '';
     return `<div class="food-pick-row">
       <button type="button" class="food-pick${remote ? ' off' : ''}${missing ? ' missing' : ''}" ${attr}>
         <div>${esc(food.name)}</div>
@@ -1265,15 +1902,18 @@
   }
 
   function paintFoodList(remote) {
-    const query = (document.getElementById('food-search').value || '').trim().toLowerCase();
-    const local = catalog().filter((food) => !query || food.name.toLowerCase().includes(query));
+    const query = fold(document.getElementById('food-search').value || '');
+    const local = catalog().filter((food) => {
+      if (!query) return true;
+      return fold(`${food.name} ${food.brand || ''}`).includes(query);
+    });
     const known = new Set(local.map((food) => food.barcode).filter(Boolean));
     const extra = (remote || []).filter((food) => food.barcode && !known.has(food.barcode));
     extra.forEach((food) => shownOff.set(food.id, food));
     const root = document.getElementById('food-results');
     if (!local.length && !extra.length) {
       root.innerHTML = query.length >= 2
-        ? '<p class="note">Nic v telefonu. Když Open Food Facts něco najde, objeví se to tady.</p>'
+        ? '<p class="note">Nic v katalogu. Když Open Food Facts něco najde, objeví se to tady.</p>'
         : '<p class="note">Nic takového nemám. Přidej si vlastní potravinu.</p>';
       return;
     }
@@ -1332,7 +1972,7 @@
       offHits = foods;
       offFor = query;
       const current = (document.getElementById('food-search').value || '').trim();
-      if (current.toLowerCase() !== query.toLowerCase()) return;
+      if (fold(current) !== fold(query)) return;
       const known = new Set(catalog().map((food) => food.barcode).filter(Boolean));
       const fresh = foods.filter((food) => !known.has(food.barcode));
       paintFoodList(foods);
@@ -1356,7 +1996,7 @@
     document.getElementById('add-target').textContent =
       `Zapisuješ do ${formatDate(state.selectedDate)} · ${KCAL.mealLabels[addMeal]}. Nejdřív zvolíš gramy.`;
     const query = (document.getElementById('food-search').value || '').trim();
-    paintFoodList(query.toLowerCase() === offFor.toLowerCase() ? offHits : []);
+    paintFoodList(fold(query) === fold(offFor) ? offHits : []);
     scheduleOff(query);
   }
 
@@ -1368,23 +2008,28 @@
     else if (name === 'mikro') renderMikro();
     else if (name === 'zasoby') renderZasoby();
     else if (name === 'pridat') renderPridat();
+    else if (name === 'nastaveni') renderNastaveni();
   }
 
   function navigate(name) {
-    if (!['dnes', 'mikro', 'zasoby', 'pridat'].includes(name)) name = 'dnes';
+    if (!APP_ROUTES.includes(name)) name = 'dnes';
     hideRowActions();
     if (name !== 'pridat') stopScan();
-    history.replaceState(null, '', '#' + name);
+    const hash = '#' + name;
+    if (location.hash !== hash) history.replaceState(null, '', hash);
     document.querySelectorAll('.screen').forEach((screen) => {
       screen.classList.toggle('active', screen.id === 'screen-' + name);
     });
     document.querySelectorAll('.nav-btn').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.nav === name);
     });
+    const settings = document.getElementById('open-settings');
+    if (settings) settings.classList.toggle('active', name === 'nastaveni');
     if (name === 'dnes') renderDnes();
     if (name === 'mikro') renderMikro();
     if (name === 'zasoby') renderZasoby();
     if (name === 'pridat') renderPridat();
+    if (name === 'nastaveni') renderNastaveni();
   }
 
   function stepGrams(delta) {
@@ -1394,6 +2039,65 @@
     const next = Math.max(1, round(base + delta, 1));
     input.value = String(next);
     paintPreview();
+  }
+
+  async function onAuthSubmit(event) {
+    event.preventDefault();
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value;
+    const password2 = document.getElementById('auth-password2').value;
+    showAuthError('');
+    showAuthInfo('');
+    if (authMode !== 'recovery' && !email) {
+      showAuthError('Napiš e-mail.');
+      return;
+    }
+    if (authMode !== 'reset' && password.length < 6) {
+      showAuthError('Heslo musí mít aspoň 6 znaků.');
+      return;
+    }
+    if ((authMode === 'signup' || authMode === 'recovery') && password !== password2) {
+      showAuthError('Hesla se neshodují.');
+      return;
+    }
+    const submit = document.getElementById('auth-submit');
+    submit.disabled = true;
+    try {
+      if (authMode === 'login') {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      } else if (authMode === 'signup') {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo: redirectUrl() },
+        });
+        if (error) throw error;
+        if (!data.session) {
+          showAuthInfo('Účet je založený. Otevři odkaz v e-mailu. Pak se přihlas heslem, nebo se sem rovnou vrátíš, když odkaz otevřeš v tomhle prohlížeči.');
+          showAuthMode('login');
+          document.getElementById('auth-email').value = email;
+        }
+      } else if (authMode === 'reset') {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: redirectUrl() });
+        if (error) throw error;
+        showAuthInfo('Pokud k e-mailu účet patří, poslali jsme odkaz na nové heslo.');
+        showAuthMode('login');
+        document.getElementById('auth-email').value = email;
+      } else if (authMode === 'recovery') {
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) throw error;
+        recoveryPending = false;
+        toast('Heslo je změněné.');
+        const { data } = await supabase.auth.getSession();
+        await enterApp(data.session);
+      }
+    } catch (err) {
+      console.warn(err);
+      showAuthError(czechAuthError(err));
+    } finally {
+      submit.disabled = false;
+    }
   }
 
   document.querySelectorAll('.nav-btn').forEach((btn) => {
@@ -1413,6 +2117,22 @@
   });
   document.getElementById('food-search').addEventListener('input', renderPridat);
   document.getElementById('new-food').addEventListener('click', () => openFoodForm(null));
+  document.getElementById('open-settings').addEventListener('click', () => navigate('nastaveni'));
+  document.getElementById('set-goals').addEventListener('click', () => navigate('nastaveni'));
+  document.getElementById('goals-form').addEventListener('submit', (event) => { void saveGoals(event); });
+  document.getElementById('logout').addEventListener('click', () => { void supabase.auth.signOut(); });
+  document.getElementById('auth-form').addEventListener('submit', (event) => { void onAuthSubmit(event); });
+  document.getElementById('auth-toggle').addEventListener('click', () => {
+    showAuthError('');
+    showAuthInfo('');
+    if (authMode === 'signup' || authMode === 'reset') showAuthMode('login');
+    else showAuthMode('signup');
+  });
+  document.getElementById('auth-reset').addEventListener('click', () => {
+    showAuthError('');
+    showAuthInfo('');
+    showAuthMode('reset');
+  });
 
   document.getElementById('week-prev').addEventListener('click', () => {
     setSelectedDate(addDays(state.selectedDate, -7));
@@ -1429,35 +2149,30 @@
   document.getElementById('gram-minus').addEventListener('click', () => stepGrams(-10));
   document.getElementById('gram-plus').addEventListener('click', () => stepGrams(10));
   document.getElementById('pack-btn').addEventListener('click', () => {
-    if (!amountCtx) return;
-    const food = foodById(amountCtx.foodId);
-    if (!food || !food.package_g) return;
-    document.getElementById('gram-input').value = String(food.package_g);
+    if (!amountCtx || !amountCtx.food || !amountCtx.food.package_g) return;
+    document.getElementById('gram-input').value = String(amountCtx.food.package_g);
     paintPreview();
   });
   document.getElementById('piece-btn').addEventListener('click', () => {
-    if (!amountCtx) return;
-    const food = foodById(amountCtx.foodId);
-    if (!food || !food.piece_g) return;
-    document.getElementById('gram-input').value = String(food.piece_g);
+    if (!amountCtx || !amountCtx.food || !amountCtx.food.piece_g) return;
+    document.getElementById('gram-input').value = String(amountCtx.food.piece_g);
     paintPreview();
   });
   document.getElementById('amount-cancel').addEventListener('click', closeAmount);
-  document.getElementById('amount-save').addEventListener('click', commitAmount);
+  document.getElementById('amount-save').addEventListener('click', () => { void commitAmount(); });
   document.getElementById('amount-delete').addEventListener('click', () => {
-    if (amountCtx && amountCtx.entryId) deleteEntry(amountCtx.entryId);
+    if (amountCtx && amountCtx.entryId) void deleteEntry(amountCtx.entryId);
   });
   document.getElementById('amount-back').addEventListener('click', (event) => {
     if (event.target.id === 'amount-back') closeAmount();
   });
   document.getElementById('gram-input').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') commitAmount();
+    if (event.key === 'Enter') void commitAmount();
   });
 
   document.getElementById('food-cancel').addEventListener('click', closeFoodForm);
-  document.getElementById('food-save').addEventListener('click', saveFoodForm);
-  document.getElementById('food-delete').addEventListener('click', deleteCustomFood);
-  document.getElementById('food-reset').addEventListener('click', resetBuiltinFood);
+  document.getElementById('food-save').addEventListener('click', () => { void saveFoodForm(); });
+  document.getElementById('food-delete').addEventListener('click', () => { void deleteCustomFood(); });
   document.getElementById('food-back').addEventListener('click', (event) => {
     if (event.target.id === 'food-back') closeFoodForm();
   });
@@ -1465,19 +2180,19 @@
   document.getElementById('barcode-scan').addEventListener('click', startScan);
   document.getElementById('scan-stop').addEventListener('click', stopScan);
   document.getElementById('barcode-go').addEventListener('click', () => {
-    applyBarcode(document.getElementById('barcode').value);
+    void applyBarcode(document.getElementById('barcode').value);
   });
   document.getElementById('barcode').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') applyBarcode(event.target.value);
+    if (event.key === 'Enter') void applyBarcode(event.target.value);
   });
   document.getElementById('barcode-camera').addEventListener('change', (event) => {
     const file = event.target.files && event.target.files[0];
-    decodeImageFile(file);
+    void decodeImageFile(file);
     event.target.value = '';
   });
   document.getElementById('barcode-gallery').addEventListener('change', (event) => {
     const file = event.target.files && event.target.files[0];
-    decodeImageFile(file);
+    void decodeImageFile(file);
     event.target.value = '';
   });
 
@@ -1495,7 +2210,9 @@
   window.addEventListener('pagehide', stopScan);
   window.addEventListener('beforeunload', stopScan);
 
-  loadState();
-  const hash = (location.hash || '#dnes').slice(1);
-  navigate(hash);
+  if (pendingAuthError && !recoveryPending) {
+    showAuthMode('login');
+    showAuthError(pendingAuthError);
+    pendingAuthError = '';
+  }
 })();

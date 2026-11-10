@@ -1,13 +1,6 @@
-/* Starter catalog + one sample week. The app copies the sample diary into
-   localStorage only on the first visit — it never overwrites a real log. */
+/* Bundled catalog only. Diary, custom foods, pantry, and goals live in Supabase.
+   Nothing here is copied into a new account. */
 window.KCAL = window.KCAL || {};
-
-KCAL.goals = {
-  kcal: 2800,
-  protein_g: 170,
-  carbs_g: 320,
-  fat_g: 80,
-};
 
 /* EFSA adult-male oriented targets (same keys as nutrient_targets in schema). Informational. */
 KCAL.targets = [
@@ -193,104 +186,6 @@ KCAL.foods = [
   { id: "off:8594003849602", name: "Limonáda Kofola original", barcode: "8594003849602", kcal: 32.0, protein: 0.5, carbs: 8.0, fat: 0.5, fiber: null, default_serving_g: 100, micros: {} },
   { id: "off:8590421070413", name: "Křupavé müsli s ořechy (Emma Grown for good)", barcode: "8590421070413", kcal: 480.0, protein: 9.0, carbs: 65.0, fat: 19.0, fiber: 6.6, package_g: 350.0, default_serving_g: 100, micros: {} },
   { id: "off:8593894813297", name: "Tatranky (Opavia)", barcode: "8593894813297", kcal: 535.0, protein: 6.9, carbs: 57.0, fat: 31.0, fiber: 2.6, package_g: 47.0, default_serving_g: 100, micros: {} },
-];
-
-/* Sample week of 2.–8. 11. 2026 (Po–Ne). Fri is the original training day (~2467 kcal, under goal).
-   Tue meets the goal, Wed is a bit over, Thu is clearly over, Mon is light. Weekend is empty on purpose. */
-KCAL.sampleDiary = [
-  { id: 'd16', date: '2026-11-02', meal: 'snidane', foodId: 'f5', grams: 60 },
-  { id: 'd17', date: '2026-11-02', meal: 'snidane', foodId: 'f4', grams: 150 },
-  { id: 'd18', date: '2026-11-02', meal: 'snidane', foodId: 'f6', grams: 100 },
-  { id: 'd19', date: '2026-11-02', meal: 'obed', foodId: 'f1', grams: 150 },
-  { id: 'd20', date: '2026-11-02', meal: 'obed', foodId: 'f2', grams: 180 },
-  { id: 'd21', date: '2026-11-02', meal: 'obed', foodId: 'f9', grams: 100 },
-  { id: 'd22', date: '2026-11-02', meal: 'vecere', foodId: 'f10', grams: 120 },
-  { id: 'd23', date: '2026-11-02', meal: 'vecere', foodId: 'f15', grams: 200 },
-  { id: 'd24', date: '2026-11-02', meal: 'vecere', foodId: 'f3', grams: 60 },
-
-  { id: 'd25', date: '2026-11-03', meal: 'snidane', foodId: 'f5', grams: 90 },
-  { id: 'd26', date: '2026-11-03', meal: 'snidane', foodId: 'f4', grams: 200 },
-  { id: 'd27', date: '2026-11-03', meal: 'snidane', foodId: 'f6', grams: 120 },
-  { id: 'd28', date: '2026-11-03', meal: 'svacina', foodId: 'f7', grams: 200 },
-  { id: 'd29', date: '2026-11-03', meal: 'svacina', foodId: 'f11', grams: 80 },
-  { id: 'd30', date: '2026-11-03', meal: 'obed', foodId: 'f1', grams: 220 },
-  { id: 'd31', date: '2026-11-03', meal: 'obed', foodId: 'f2', grams: 300 },
-  { id: 'd32', date: '2026-11-03', meal: 'obed', foodId: 'f9', grams: 150 },
-  { id: 'd33', date: '2026-11-03', meal: 'obed', foodId: 'f8', grams: 12 },
-  { id: 'd34', date: '2026-11-03', meal: 'svacina', foodId: 'f16', grams: 40 },
-  { id: 'd35', date: '2026-11-03', meal: 'svacina', foodId: 'f6', grams: 100 },
-  { id: 'd36', date: '2026-11-03', meal: 'vecere', foodId: 'f10', grams: 180 },
-  { id: 'd37', date: '2026-11-03', meal: 'vecere', foodId: 'f15', grams: 300 },
-  { id: 'd38', date: '2026-11-03', meal: 'vecere', foodId: 'f3', grams: 120 },
-  { id: 'd39', date: '2026-11-03', meal: 'vecere', foodId: 'f13', grams: 50 },
-  { id: 'd40', date: '2026-11-03', meal: 'vecere', foodId: 'f12', grams: 8 },
-
-  { id: 'd41', date: '2026-11-04', meal: 'snidane', foodId: 'f5', grams: 90 },
-  { id: 'd42', date: '2026-11-04', meal: 'snidane', foodId: 'f4', grams: 200 },
-  { id: 'd43', date: '2026-11-04', meal: 'snidane', foodId: 'f6', grams: 120 },
-  { id: 'd44', date: '2026-11-04', meal: 'svacina', foodId: 'f7', grams: 200 },
-  { id: 'd45', date: '2026-11-04', meal: 'svacina', foodId: 'f11', grams: 80 },
-  { id: 'd46', date: '2026-11-04', meal: 'obed', foodId: 'f1', grams: 220 },
-  { id: 'd47', date: '2026-11-04', meal: 'obed', foodId: 'f2', grams: 400 },
-  { id: 'd48', date: '2026-11-04', meal: 'obed', foodId: 'f9', grams: 150 },
-  { id: 'd49', date: '2026-11-04', meal: 'obed', foodId: 'f8', grams: 12 },
-  { id: 'd50', date: '2026-11-04', meal: 'svacina', foodId: 'f16', grams: 40 },
-  { id: 'd51', date: '2026-11-04', meal: 'svacina', foodId: 'f6', grams: 100 },
-  { id: 'd52', date: '2026-11-04', meal: 'vecere', foodId: 'f10', grams: 180 },
-  { id: 'd53', date: '2026-11-04', meal: 'vecere', foodId: 'f15', grams: 300 },
-  { id: 'd54', date: '2026-11-04', meal: 'vecere', foodId: 'f3', grams: 120 },
-  { id: 'd55', date: '2026-11-04', meal: 'vecere', foodId: 'f13', grams: 50 },
-  { id: 'd56', date: '2026-11-04', meal: 'vecere', foodId: 'f12', grams: 8 },
-
-  { id: 'd57', date: '2026-11-05', meal: 'snidane', foodId: 'f5', grams: 90 },
-  { id: 'd58', date: '2026-11-05', meal: 'snidane', foodId: 'f4', grams: 200 },
-  { id: 'd59', date: '2026-11-05', meal: 'snidane', foodId: 'f6', grams: 120 },
-  { id: 'd60', date: '2026-11-05', meal: 'svacina', foodId: 'f7', grams: 200 },
-  { id: 'd61', date: '2026-11-05', meal: 'svacina', foodId: 'f11', grams: 160 },
-  { id: 'd62', date: '2026-11-05', meal: 'obed', foodId: 'f1', grams: 220 },
-  { id: 'd63', date: '2026-11-05', meal: 'obed', foodId: 'f2', grams: 300 },
-  { id: 'd64', date: '2026-11-05', meal: 'obed', foodId: 'f9', grams: 150 },
-  { id: 'd65', date: '2026-11-05', meal: 'obed', foodId: 'f8', grams: 27 },
-  { id: 'd66', date: '2026-11-05', meal: 'svacina', foodId: 'f16', grams: 40 },
-  { id: 'd67', date: '2026-11-05', meal: 'svacina', foodId: 'f6', grams: 100 },
-  { id: 'd68', date: '2026-11-05', meal: 'vecere', foodId: 'f10', grams: 180 },
-  { id: 'd69', date: '2026-11-05', meal: 'vecere', foodId: 'f15', grams: 300 },
-  { id: 'd70', date: '2026-11-05', meal: 'vecere', foodId: 'f3', grams: 120 },
-  { id: 'd71', date: '2026-11-05', meal: 'vecere', foodId: 'f13', grams: 50 },
-  { id: 'd72', date: '2026-11-05', meal: 'vecere', foodId: 'f12', grams: 48 },
-
-  { id: 'd1', date: '2026-11-06', meal: 'snidane', foodId: 'f5', grams: 80 },
-  { id: 'd2', date: '2026-11-06', meal: 'snidane', foodId: 'f4', grams: 200 },
-  { id: 'd3', date: '2026-11-06', meal: 'snidane', foodId: 'f6', grams: 120 },
-  { id: 'd4', date: '2026-11-06', meal: 'svacina', foodId: 'f7', grams: 180 },
-  { id: 'd5', date: '2026-11-06', meal: 'svacina', foodId: 'f11', grams: 60 },
-  { id: 'd6', date: '2026-11-06', meal: 'obed', foodId: 'f1', grams: 200 },
-  { id: 'd7', date: '2026-11-06', meal: 'obed', foodId: 'f2', grams: 250 },
-  { id: 'd8', date: '2026-11-06', meal: 'obed', foodId: 'f9', grams: 180 },
-  { id: 'd9', date: '2026-11-06', meal: 'obed', foodId: 'f8', grams: 10 },
-  { id: 'd10', date: '2026-11-06', meal: 'svacina', foodId: 'f16', grams: 35 },
-  { id: 'd11', date: '2026-11-06', meal: 'svacina', foodId: 'f6', grams: 100 },
-  { id: 'd12', date: '2026-11-06', meal: 'vecere', foodId: 'f10', grams: 160 },
-  { id: 'd13', date: '2026-11-06', meal: 'vecere', foodId: 'f15', grams: 250 },
-  { id: 'd14', date: '2026-11-06', meal: 'vecere', foodId: 'f13', grams: 80 },
-  { id: 'd15', date: '2026-11-06', meal: 'vecere', foodId: 'f3', grams: 100 },
-];
-
-KCAL.pantry = [
-  { foodId: 'f1', qty: 600, unit: 'g', loc: 'lednice', expiry: '2026-11-08', opened: false },
-  { foodId: 'f4', qty: 2, unit: 'ks', loc: 'lednice', expiry: '2026-11-12', opened: false },
-  { foodId: 'f7', qty: 1, unit: 'ks', loc: 'lednice', expiry: '2026-11-09', opened: true },
-  { foodId: 'f3', qty: 8, unit: 'ks', loc: 'lednice', expiry: '2026-11-18', opened: false },
-  { foodId: 'f14', qty: 250, unit: 'g', loc: 'lednice', expiry: '2026-11-07', opened: true },
-  { foodId: 'f10', qty: 400, unit: 'g', loc: 'mrazak', expiry: '2026-12-15', opened: false },
-  { foodId: 'f9', qty: 500, unit: 'g', loc: 'mrazak', expiry: '2027-01-20', opened: false },
-  { foodId: 'f13', qty: 300, unit: 'g', loc: 'mrazak', expiry: '2026-12-01', opened: false },
-  { foodId: 'f5', qty: 1000, unit: 'g', loc: 'spiz', expiry: '2027-03-01', opened: true },
-  { foodId: 'f2', qty: 1500, unit: 'g', loc: 'spiz', expiry: '2027-06-01', opened: false },
-  { foodId: 'f8', qty: 500, unit: 'ml', loc: 'spiz', expiry: '2027-02-01', opened: true },
-  { foodId: 'f16', qty: 800, unit: 'g', loc: 'spiz', expiry: '2027-04-10', opened: true },
-  { foodId: 'f12', qty: 250, unit: 'g', loc: 'spiz', expiry: '2026-12-20', opened: true },
-  { foodId: 'f11', qty: 1, unit: 'ks', loc: 'spiz', expiry: '2026-11-10', opened: true },
 ];
 
 KCAL.mealLabels = {
